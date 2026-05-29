@@ -1,0 +1,981 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Street Ball 21</title>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    overflow: hidden;
+  }
+  canvas {
+    display: block;
+    image-rendering: pixelated;
+    border: 2px solid #00ffff;
+    box-shadow: 0 0 30px #00ffff44;
+  }
+</style>
+</head>
+<body>
+<canvas id="gameCanvas" width="800" height="500"></canvas>
+<script>
+// ─── CANVAS SETUP ───────────────────────────────────────────────────────────
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const W = 800, H = 500;
+
+// ─── AUDIO ──────────────────────────────────────────────────────────────────
+let audioCtx = null;
+function ensureAudio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+}
+function playBounce() {
+  ensureAudio();
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = 'square';
+  osc.frequency.setValueAtTime(180, audioCtx.currentTime);
+  gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.08);
+  osc.connect(gain); gain.connect(audioCtx.destination);
+  osc.start(); osc.stop(audioCtx.currentTime + 0.08);
+}
+function playScore() {
+  ensureAudio();
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(600, audioCtx.currentTime);
+  osc.frequency.exponentialRampToValueAtTime(150, audioCtx.currentTime + 0.25);
+  gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.25);
+  osc.connect(gain); gain.connect(audioCtx.destination);
+  osc.start(); osc.stop(audioCtx.currentTime + 0.25);
+}
+function playMiss() {
+  ensureAudio();
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(80, audioCtx.currentTime);
+  gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.2);
+  osc.connect(gain); gain.connect(audioCtx.destination);
+  osc.start(); osc.stop(audioCtx.currentTime + 0.2);
+}
+function playWinJingle() {
+  ensureAudio();
+  const notes = [523, 659, 784, 1047, 1319];
+  notes.forEach((freq, i) => {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(freq, audioCtx.currentTime + i * 0.12);
+    gain.gain.setValueAtTime(0, audioCtx.currentTime + i * 0.12);
+    gain.gain.linearRampToValueAtTime(0.25, audioCtx.currentTime + i * 0.12 + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + i * 0.12 + 0.15);
+    osc.connect(gain); gain.connect(audioCtx.destination);
+    osc.start(audioCtx.currentTime + i * 0.12);
+    osc.stop(audioCtx.currentTime + i * 0.12 + 0.15);
+  });
+}
+
+// ─── CONSTANTS ───────────────────────────────────────────────────────────────
+const GRAVITY = 0.35;
+const BALL_R = 12;
+const FLOOR_Y = 380;
+const WINNING_SCORE = 21;
+
+// Hoops
+const CPU_HOOP  = { backboardX: 720, rimY: 220, rimX1: 660, rimX2: 700 };
+const PLAYER_HOOP = { backboardX: 80,  rimY: 220, rimX1: 100, rimX2: 140 };
+
+// Player/CPU positions
+const PLAYER_X = 200;
+const PLAYER_Y = FLOOR_Y - 60;
+const CPU_X = 580;
+const CPU_Y = FLOOR_Y - 60;
+
+// ─── GAME STATE ──────────────────────────────────────────────────────────────
+const STATE = {
+  MENU: 'MENU', PLAYER_TURN: 'PLAYER_TURN', CPU_TURN: 'CPU_TURN',
+  BALL_FLYING: 'BALL_FLYING', GAME_OVER: 'GAME_OVER'
+};
+let gameState = STATE.MENU;
+
+let playerScore = 0;
+let cpuScore = 0;
+let whose_turn = 'player'; // 'player' or 'cpu'
+
+// Ball
+let ball = { x: 0, y: 0, vx: 0, vy: 0, rotation: 0, active: false };
+let ballTrail = [];
+
+// Player aim
+let aimAngle = 55; // degrees
+let power = 0;
+let charging = false;
+
+// Screen shake
+let shakeX = 0, shakeY = 0, shakeMag = 0;
+
+// Particles
+let particles = [];
+
+// Popup text
+let popup = { text: '', x: 0, y: 0, timer: 0, color: '#fff' };
+
+// Score flash
+let scoreFlash = { who: '', timer: 0 };
+
+// CPU turn timer
+let cpuTimer = 0;
+
+// Stars (static)
+const stars = [];
+for (let i = 0; i < 50; i++) {
+  stars.push({ x: Math.random() * W, y: Math.random() * 200, r: Math.random() * 1.5 + 0.5, bright: Math.random() });
+}
+
+// City skyline blocks
+const skyline = [];
+const skylineColors = ['#0a0a1a', '#0d0d22', '#080818'];
+let sx = 0;
+while (sx < W) {
+  const bw = Math.random() * 35 + 15;
+  const bh = Math.random() * 80 + 30;
+  skyline.push({ x: sx, y: 300 - bh, w: bw, h: bh, color: skylineColors[Math.floor(Math.random() * 3)] });
+  sx += bw + Math.random() * 5;
+}
+
+// Crowd silhouettes
+const crowd = [];
+for (let i = 0; i < 40; i++) {
+  crowd.push({ x: i * 22 + Math.random() * 10, y: 55 + Math.random() * 15, r: 7 + Math.random() * 4 });
+}
+
+// ─── INPUT ───────────────────────────────────────────────────────────────────
+const keys = {};
+document.addEventListener('keydown', e => {
+  if (!keys[e.code]) {
+    keys[e.code] = true;
+    onKeyDown(e.code);
+  }
+  // Prevent page scroll
+  if (['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)) e.preventDefault();
+});
+document.addEventListener('keyup', e => {
+  keys[e.code] = false;
+  onKeyUp(e.code);
+});
+
+function onKeyDown(code) {
+  ensureAudio();
+  if (gameState === STATE.MENU && code === 'Enter') { startGame(); return; }
+  if (gameState === STATE.GAME_OVER && code === 'Enter') { startGame(); return; }
+  if (gameState === STATE.PLAYER_TURN) {
+    if (code === 'ArrowLeft')  aimAngle = Math.min(85, aimAngle + 2);
+    if (code === 'ArrowRight') aimAngle = Math.max(10, aimAngle - 2);
+    if (code === 'Space') charging = true;
+  }
+}
+
+function onKeyUp(code) {
+  if (gameState === STATE.PLAYER_TURN && code === 'Space' && charging) {
+    charging = false;
+    shootBall('player');
+  }
+}
+
+// ─── GAME LOGIC ──────────────────────────────────────────────────────────────
+function startGame() {
+  playerScore = 0; cpuScore = 0;
+  whose_turn = 'player';
+  particles = []; ballTrail = [];
+  popup.timer = 0; scoreFlash.timer = 0;
+  power = 0; charging = false;
+  aimAngle = 55;
+  resetBall();
+  gameState = STATE.PLAYER_TURN;
+}
+
+function resetBall() {
+  if (whose_turn === 'player') {
+    ball.x = PLAYER_X + 12;
+    ball.y = PLAYER_Y - 22;
+  } else {
+    ball.x = CPU_X - 12;
+    ball.y = CPU_Y - 22;
+  }
+  ball.vx = 0; ball.vy = 0;
+  ball.rotation = 0;
+  ball.active = false;
+  ballTrail = [];
+  power = 0;
+  charging = false;
+}
+
+function shootBall(shooter) {
+  ball.active = true;
+  const angleRad = aimAngle * Math.PI / 180;
+  const pwr = Math.max(6, power);
+  if (shooter === 'player') {
+    ball.vx =  pwr * Math.cos(angleRad);
+    ball.vy = -pwr * Math.sin(angleRad);
+  } else {
+    ball.vx = -pwr * Math.cos(angleRad);
+    ball.vy = -pwr * Math.sin(angleRad);
+  }
+  gameState = STATE.BALL_FLYING;
+}
+
+// ─── CPU AI ──────────────────────────────────────────────────────────────────
+function cpuAI() {
+  const rimCX = (PLAYER_HOOP.rimX1 + PLAYER_HOOP.rimX2) / 2;
+  const rimCY = PLAYER_HOOP.rimY;
+  const startX = CPU_X - 12;
+  const startY = CPU_Y - 22;
+  const dx = Math.abs(startX - rimCX);
+
+  // Find power for 45 degree angle (optimal range shot)
+  // x = p*cos(45)*t, at peak: t_peak = p*sin(45)/g
+  // Numerically solve: start with angle 45 and derive power
+  let bestAngle = 45;
+  // p = sqrt(dx * g / |sin(2*angle)|) but adjusted for height diff
+  let bestPow = Math.sqrt(dx * GRAVITY / Math.sin(2 * bestAngle * Math.PI / 180));
+  bestPow = Math.max(8, Math.min(18, bestPow));
+
+  // Add noise based on score
+  const noise = cpuScore >= 15 ? 7 : 12;
+  bestAngle += (Math.random() - 0.5) * noise;
+  bestPow   += (Math.random() - 0.5) * 2.5;
+  bestAngle = Math.max(15, Math.min(75, bestAngle));
+  bestPow   = Math.max(6,  Math.min(18, bestPow));
+
+  aimAngle = bestAngle;
+  power    = bestPow;
+  ball.x   = startX;
+  ball.y   = startY;
+  shootBall('cpu');
+}
+
+// ─── PARTICLES ───────────────────────────────────────────────────────────────
+function spawnParticles(x, y) {
+  const colors = ['#ff6600','#ffaa00','#ff0066','#00ffff','#ffffff','#ffff00'];
+  for (let i = 0; i < 12; i++) {
+    const angle = (Math.PI * 2 * i / 12) + Math.random() * 0.4;
+    const speed = Math.random() * 4 + 2;
+    particles.push({
+      x, y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed - 2,
+      life: 1,
+      decay: Math.random() * 0.03 + 0.02,
+      color: colors[Math.floor(Math.random() * colors.length)],
+      r: Math.random() * 5 + 2
+    });
+  }
+}
+
+function showPopup(text, x, y, color) {
+  popup.text = text; popup.x = x; popup.y = y;
+  popup.timer = 90; popup.color = color || '#ffffff';
+}
+
+// ─── PHYSICS & COLLISION ─────────────────────────────────────────────────────
+function checkScore(hoop) {
+  const inner1 = hoop.rimX1 + 4;
+  const inner2 = hoop.rimX2 - 4;
+  // Use a swept vertical window equal to the ball's radius plus the rim
+  // thickness so fast-moving balls don't tunnel through the detection plane.
+  const tolerance = BALL_R + 6;
+  if (ball.vy > 0 &&
+      Math.abs(ball.y - hoop.rimY) < tolerance &&
+      ball.x > inner1 && ball.x < inner2) {
+    return true;
+  }
+  return false;
+}
+
+function checkRimCollision(hoop) {
+  const pts = [
+    { x: hoop.rimX1, y: hoop.rimY },
+    { x: hoop.rimX2, y: hoop.rimY }
+  ];
+  for (const pt of pts) {
+    const dx = ball.x - pt.x;
+    const dy = ball.y - pt.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < BALL_R + 5 && dist > 0) {
+      const nx = dx / dist, ny = dy / dist;
+      const dot = ball.vx * nx + ball.vy * ny;
+      ball.vx = (ball.vx - 2 * dot * nx) * 0.5;
+      ball.vy = (ball.vy - 2 * dot * ny) * 0.5;
+      ball.x  = pt.x + nx * (BALL_R + 5);
+      ball.y  = pt.y + ny * (BALL_R + 5);
+      shakeMag = 4;
+      playBounce();
+    }
+  }
+}
+
+function updateBall() {
+  if (!ball.active) return;
+
+  // Trail
+  ballTrail.push({ x: ball.x, y: ball.y });
+  if (ballTrail.length > 8) ballTrail.shift();
+
+  // Physics
+  ball.vy += GRAVITY;
+  ball.x  += ball.vx;
+  ball.y  += ball.vy;
+  ball.rotation += ball.vx * 0.08;
+
+  // Determine target hoop
+  const hoop = whose_turn === 'player' ? CPU_HOOP : PLAYER_HOOP;
+
+  // Check score first
+  if (checkScore(hoop)) {
+    if (whose_turn === 'player') {
+      playerScore += 2;
+      showPopup('SWISH!', ball.x, ball.y - 40, '#00ffff');
+      scoreFlash = { who: 'player', timer: 45 };
+    } else {
+      cpuScore += 2;
+      showPopup('NICE!', ball.x, ball.y - 40, '#ff4444');
+      scoreFlash = { who: 'cpu', timer: 45 };
+    }
+    spawnParticles(ball.x, ball.y);
+    playScore();
+    ball.active = false;
+    ballTrail = [];
+
+    if (playerScore >= WINNING_SCORE || cpuScore >= WINNING_SCORE) {
+      setTimeout(() => { playWinJingle(); gameState = STATE.GAME_OVER; }, 700);
+    } else {
+      whose_turn = whose_turn === 'player' ? 'cpu' : 'player';
+      setTimeout(() => nextTurn(), 1100);
+    }
+    return;
+  }
+
+  // Rim collisions (both hoops)
+  checkRimCollision(CPU_HOOP);
+  checkRimCollision(PLAYER_HOOP);
+
+  // Miss
+  if (ball.y > H + 20 || ball.x < -60 || ball.x > W + 60) {
+    showPopup('MISS!', W / 2, H / 2 - 60, '#ff6600');
+    playMiss();
+    ball.active = false;
+    ballTrail = [];
+    whose_turn = whose_turn === 'player' ? 'cpu' : 'player';
+    setTimeout(() => nextTurn(), 1100);
+  }
+}
+
+function nextTurn() {
+  resetBall();
+  if (whose_turn === 'player') {
+    aimAngle = 55;
+    gameState = STATE.PLAYER_TURN;
+  } else {
+    gameState = STATE.CPU_TURN;
+    cpuTimer = 90; // ~1.5s
+  }
+}
+
+// ─── UPDATE ──────────────────────────────────────────────────────────────────
+function update() {
+  // Screen shake
+  if (shakeMag > 0) {
+    shakeX = (Math.random() - 0.5) * shakeMag * 2;
+    shakeY = (Math.random() - 0.5) * shakeMag * 2;
+    shakeMag *= 0.75;
+    if (shakeMag < 0.5) { shakeMag = 0; shakeX = 0; shakeY = 0; }
+  }
+
+  // Particles
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx; p.y += p.vy; p.vy += 0.15;
+    p.life -= p.decay;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+
+  if (popup.timer > 0) popup.timer--;
+  if (scoreFlash.timer > 0) scoreFlash.timer--;
+
+  if (gameState === STATE.PLAYER_TURN) {
+    if (keys['ArrowLeft'])  aimAngle = Math.min(85, aimAngle + 1.5);
+    if (keys['ArrowRight']) aimAngle = Math.max(10, aimAngle - 1.5);
+    if (charging) power = Math.min(18, power + 0.25);
+  }
+
+  if (gameState === STATE.CPU_TURN) {
+    cpuTimer--;
+    if (cpuTimer <= 0) cpuAI();
+  }
+
+  if (gameState === STATE.BALL_FLYING) {
+    updateBall();
+  }
+}
+
+// ─── DRAW HELPERS ────────────────────────────────────────────────────────────
+function drawBackground() {
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0,   '#050510');
+  grad.addColorStop(0.6, '#0a0a20');
+  grad.addColorStop(1,   '#0d0d28');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Stars
+  for (const s of stars) {
+    ctx.fillStyle = `rgba(255,255,255,${0.4 + s.bright * 0.6})`;
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // City skyline
+  for (const b of skyline) {
+    ctx.fillStyle = b.color;
+    ctx.fillRect(b.x, b.y, b.w, b.h);
+  }
+  // Draw moon
+  ctx.fillStyle = '#ffffcc';
+  ctx.shadowBlur = 12; ctx.shadowColor = '#ffffaa';
+  ctx.beginPath(); ctx.arc(120, 60, 18, 0, Math.PI * 2); ctx.fill();
+  ctx.shadowBlur = 0;
+  // Moon crater
+  ctx.fillStyle = '#eeeebb';
+  ctx.beginPath(); ctx.arc(126, 55, 5, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(114, 65, 3, 0, Math.PI * 2); ctx.fill();
+}
+
+function drawFloor() {
+  const floorGrad = ctx.createLinearGradient(0, FLOOR_Y, 0, H);
+  floorGrad.addColorStop(0,   '#8B5E2F');
+  floorGrad.addColorStop(0.3, '#7A4F25');
+  floorGrad.addColorStop(1,   '#3A1F08');
+  ctx.fillStyle = floorGrad;
+  ctx.fillRect(0, FLOOR_Y, W, H - FLOOR_Y);
+
+  // Plank lines
+  ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+  ctx.lineWidth = 1;
+  for (let y = FLOOR_Y + 8; y < H; y += 12) {
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+
+  // Center line
+  ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([10, 10]);
+  ctx.beginPath(); ctx.moveTo(W/2, FLOOR_Y); ctx.lineTo(W/2, H); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Three-point arcs (approximate)
+  ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+  ctx.lineWidth = 2;
+  // Player side (right arc from left)
+  ctx.beginPath();
+  ctx.arc(80, FLOOR_Y, 160, -Math.PI/2, 0);
+  ctx.stroke();
+  // CPU side (left arc from right)
+  ctx.beginPath();
+  ctx.arc(720, FLOOR_Y, 160, Math.PI, Math.PI + Math.PI/2);
+  ctx.stroke();
+
+  // Center circle
+  ctx.beginPath();
+  ctx.arc(W/2, FLOOR_Y + 45, 45, 0, Math.PI * 2);
+  ctx.stroke();
+}
+
+function drawHoop(hoop, side) {
+  const bbX = hoop.backboardX;
+  const bw = 8, bh = 100;
+
+  // Pole
+  ctx.fillStyle = '#888';
+  if (side === 'right') {
+    ctx.fillRect(bbX + 2, hoop.rimY + 52, 5, FLOOR_Y - hoop.rimY - 52);
+  } else {
+    ctx.fillRect(bbX - 7, hoop.rimY + 52, 5, FLOOR_Y - hoop.rimY - 52);
+  }
+
+  // Backboard
+  ctx.fillStyle = '#e0e0e0';
+  if (side === 'right') {
+    ctx.fillRect(bbX, hoop.rimY - bh/2, bw, bh);
+    // Inner square
+    ctx.strokeStyle = '#ff2222'; ctx.lineWidth = 2;
+    ctx.strokeRect(bbX + 1, hoop.rimY - 20, bw - 2, 40);
+    // Rim support arm
+    ctx.fillStyle = '#aaa';
+    ctx.fillRect(hoop.rimX2, hoop.rimY - 3, bbX - hoop.rimX2, 6);
+  } else {
+    ctx.fillRect(bbX - bw, hoop.rimY - bh/2, bw, bh);
+    ctx.strokeStyle = '#ff2222'; ctx.lineWidth = 2;
+    ctx.strokeRect(bbX - bw + 1, hoop.rimY - 20, bw - 2, 40);
+    ctx.fillStyle = '#aaa';
+    ctx.fillRect(hoop.rimX1, hoop.rimY - 3, bbX - hoop.rimX1, 6);
+  }
+
+  // Rim with neon glow
+  ctx.save();
+  ctx.shadowBlur = 15; ctx.shadowColor = '#00ffff';
+  ctx.strokeStyle = '#ff4400';
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(hoop.rimX1, hoop.rimY);
+  ctx.lineTo(hoop.rimX2, hoop.rimY);
+  ctx.stroke();
+  ctx.restore();
+
+  // Net
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+  ctx.lineWidth = 1;
+  const netTop = hoop.rimY;
+  const netBot = hoop.rimY + 35;
+  const midX   = (hoop.rimX1 + hoop.rimX2) / 2;
+  for (let nx = hoop.rimX1; nx <= hoop.rimX2; nx += 8) {
+    const offset = (nx - midX) * 0.35;
+    ctx.beginPath();
+    ctx.moveTo(nx, netTop);
+    ctx.lineTo(midX + offset * 0.4, netBot);
+    ctx.stroke();
+  }
+  for (let row = 0; row <= 3; row++) {
+    const t  = row / 3;
+    const x1 = hoop.rimX1 + (midX - hoop.rimX1) * t * 0.35;
+    const x2 = hoop.rimX2 - (hoop.rimX2 - midX) * t * 0.35;
+    ctx.beginPath();
+    ctx.moveTo(x1, netTop + t * (netBot - netTop));
+    ctx.lineTo(x2, netTop + t * (netBot - netTop));
+    ctx.stroke();
+  }
+}
+
+function drawLampPost(x) {
+  ctx.fillStyle = '#666';
+  ctx.fillRect(x - 3, 190, 6, FLOOR_Y - 190);
+  ctx.fillStyle = '#888';
+  ctx.fillRect(x - 22, 183, 44, 11);
+  // Light cone
+  const coneGrad = ctx.createRadialGradient(x, 193, 0, x, 193, 130);
+  coneGrad.addColorStop(0, 'rgba(255,240,160,0.2)');
+  coneGrad.addColorStop(1, 'rgba(255,240,160,0)');
+  ctx.fillStyle = coneGrad;
+  ctx.beginPath();
+  ctx.moveTo(x, 193);
+  ctx.lineTo(x - 90, FLOOR_Y);
+  ctx.lineTo(x + 90, FLOOR_Y);
+  ctx.closePath(); ctx.fill();
+  // Bulb
+  ctx.fillStyle = 'rgba(255,245,180,0.95)';
+  ctx.shadowBlur = 12; ctx.shadowColor = '#ffee99';
+  ctx.beginPath(); ctx.arc(x, 193, 6, 0, Math.PI * 2); ctx.fill();
+  ctx.shadowBlur = 0;
+}
+
+function drawCrowd() {
+  for (const c of crowd) {
+    ctx.fillStyle = 'rgba(15,15,35,0.95)';
+    ctx.beginPath(); ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2); ctx.fill();
+    ctx.fillRect(c.x - c.r * 0.6, c.y, c.r * 1.2, c.r * 1.6);
+    // Random colored shirt
+    const hue = (c.x * 3.7) % 360;
+    ctx.fillStyle = `hsla(${hue},70%,50%,0.3)`;
+    ctx.fillRect(c.x - c.r * 0.55, c.y, c.r * 1.1, c.r * 1.4);
+  }
+}
+
+function drawPlayerFigure(x, y, isPlayer) {
+  const bodyColor  = isPlayer ? '#2255ff' : '#cc1111';
+  const skinColor  = '#f5c5a0';
+  const shortsColor = isPlayer ? '#ffffff' : '#222222';
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.beginPath(); ctx.ellipse(x, y + 62, 18, 5, 0, 0, Math.PI * 2); ctx.fill();
+
+  // Shoes
+  ctx.fillStyle = isPlayer ? '#111188' : '#881111';
+  ctx.fillRect(x - 14, y + 56, 12, 7);
+  ctx.fillRect(x + 2,  y + 56, 12, 7);
+
+  // Legs / shorts
+  ctx.fillStyle = shortsColor;
+  ctx.fillRect(x - 9,  y + 28, 8, 28);
+  ctx.fillRect(x + 1,  y + 28, 8, 28);
+  ctx.fillRect(x - 12, y + 22, 24, 10);
+
+  // Body/jersey
+  ctx.fillStyle = bodyColor;
+  ctx.fillRect(x - 11, y - 2, 22, 26);
+
+  // Arms
+  ctx.fillStyle = skinColor;
+  if (isPlayer) {
+    // Right arm raised for shooting
+    ctx.fillRect(x + 11, y - 8, 7, 22);
+    ctx.fillRect(x - 18, y + 4, 7, 15);
+  } else {
+    ctx.fillRect(x + 11, y + 2, 7, 16);
+    ctx.fillRect(x - 18, y + 2, 7, 16);
+  }
+
+  // Head
+  ctx.fillStyle = skinColor;
+  ctx.beginPath(); ctx.arc(x, y - 12, 11, 0, Math.PI * 2); ctx.fill();
+
+  // Headband
+  ctx.fillStyle = isPlayer ? '#ffdd00' : '#ffffff';
+  ctx.fillRect(x - 11, y - 20, 22, 5);
+
+  // Jersey number
+  ctx.fillStyle = '#fff';
+  ctx.font = '7px "Press Start 2P"';
+  ctx.textAlign = 'center';
+  ctx.fillText(isPlayer ? '1' : '2', x, y + 14);
+}
+
+function drawBall() {
+  const shouldDraw = ball.active ||
+    gameState === STATE.PLAYER_TURN ||
+    gameState === STATE.CPU_TURN;
+  if (!shouldDraw) return;
+
+  // Trail
+  for (let i = 0; i < ballTrail.length; i++) {
+    const alpha = (i / ballTrail.length) * 0.4;
+    const r = BALL_R * ((i + 1) / ballTrail.length) * 0.65;
+    ctx.fillStyle = `rgba(255,100,0,${alpha})`;
+    ctx.beginPath(); ctx.arc(ballTrail[i].x, ballTrail[i].y, r, 0, Math.PI * 2); ctx.fill();
+  }
+
+  ctx.save();
+  ctx.shadowBlur = 15; ctx.shadowColor = '#ff6600';
+  ctx.translate(ball.x, ball.y);
+  ctx.rotate(ball.rotation);
+
+  const ballGrad = ctx.createRadialGradient(-3, -3, 1, 0, 0, BALL_R);
+  ballGrad.addColorStop(0, '#ff9955');
+  ballGrad.addColorStop(1, '#cc3300');
+  ctx.fillStyle = ballGrad;
+  ctx.beginPath(); ctx.arc(0, 0, BALL_R, 0, Math.PI * 2); ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // Seams
+  ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.arc(0, 0, BALL_R, 0, Math.PI); ctx.stroke();
+  ctx.beginPath(); ctx.arc(0, 0, BALL_R, Math.PI/2, -Math.PI/2); ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawAimArc() {
+  if (gameState !== STATE.PLAYER_TURN) return;
+  const angleRad = aimAngle * Math.PI / 180;
+  const pwr = Math.max(6, power);
+  const vx0 =  pwr * Math.cos(angleRad);
+  const vy0 = -pwr * Math.sin(angleRad);
+
+  ctx.strokeStyle = 'rgba(0,255,255,0.45)';
+  ctx.setLineDash([4, 5]);
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  let first = true;
+  for (let t = 0; t < 60; t += 2) {
+    const px = ball.x + vx0 * t;
+    const py = ball.y + vy0 * t + 0.5 * GRAVITY * t * t;
+    if (py > FLOOR_Y || px > W) break;
+    if (first) { ctx.moveTo(px, py); first = false; }
+    else ctx.lineTo(px, py);
+  }
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Dots
+  for (let i = 1; i <= 6; i++) {
+    const t  = i * 7;
+    const px = ball.x + vx0 * t;
+    const py = ball.y + vy0 * t + 0.5 * GRAVITY * t * t;
+    if (py > FLOOR_Y || px > W) break;
+    ctx.fillStyle = `rgba(0,255,255,${0.9 - i * 0.12})`;
+    ctx.beginPath(); ctx.arc(px, py, 3, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+function drawPowerMeter() {
+  if (gameState !== STATE.PLAYER_TURN) return;
+  const mx = 28, my = 190, mw = 18, mh = 150;
+
+  ctx.fillStyle = 'rgba(0,0,0,0.75)';
+  ctx.fillRect(mx - 3, my - 3, mw + 6, mh + 6);
+
+  const fillH = (power / 18) * mh;
+  const pct = power / 18;
+  const rr = Math.floor(pct * 255);
+  const gg = Math.floor((1 - pct) * 200);
+  ctx.fillStyle = `rgb(${rr},${gg},0)`;
+  ctx.fillRect(mx, my + mh - fillH, mw, fillH);
+
+  ctx.strokeStyle = '#00ffff'; ctx.lineWidth = 2;
+  ctx.strokeRect(mx, my, mw, mh);
+
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '6px "Press Start 2P"';
+  ctx.textAlign = 'center';
+  ctx.fillText('PWR', mx + mw/2, my + mh + 16);
+
+  if (charging) {
+    ctx.fillStyle = '#ffff00';
+    ctx.shadowBlur = 8; ctx.shadowColor = '#ffff00';
+    ctx.font = '8px "Press Start 2P"';
+    ctx.fillText('!', mx + mw/2, my - 12);
+    ctx.shadowBlur = 0;
+  }
+}
+
+function drawScoreboard() {
+  const sbX = W / 2, sbY = 14;
+  ctx.fillStyle = 'rgba(0,0,0,0.82)';
+  ctx.beginPath();
+  ctx.roundRect(sbX - 145, sbY - 10, 290, 78, 10);
+  ctx.fill();
+  ctx.strokeStyle = '#00ffff'; ctx.lineWidth = 2;
+  ctx.shadowBlur = 12; ctx.shadowColor = '#00ffff';
+  ctx.stroke(); ctx.shadowBlur = 0;
+
+  ctx.font = '8px "Press Start 2P"';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#aaffff';
+  ctx.fillText('STREET BALL 21', sbX, sbY + 8);
+
+  // Labels
+  ctx.font = '7px "Press Start 2P"';
+  ctx.fillStyle = '#6699ff'; ctx.textAlign = 'right';
+  ctx.fillText('YOU', sbX - 22, sbY + 26);
+  ctx.fillStyle = '#ff7777'; ctx.textAlign = 'left';
+  ctx.fillText('CPU', sbX + 22, sbY + 26);
+
+  // Scores
+  const pFlash = scoreFlash.who === 'player' && scoreFlash.timer > 0;
+  const cFlash = scoreFlash.who === 'cpu'    && scoreFlash.timer > 0;
+
+  ctx.font = '22px "Press Start 2P"';
+  ctx.fillStyle = pFlash ? '#ffff00' : '#4488ff';
+  ctx.shadowBlur = pFlash ? 20 : 0; ctx.shadowColor = '#ffff00';
+  ctx.textAlign = 'right';
+  ctx.fillText(playerScore, sbX - 18, sbY + 60);
+  ctx.shadowBlur = 0;
+
+  ctx.fillStyle = '#aaa'; ctx.textAlign = 'center';
+  ctx.fillText('-', sbX, sbY + 60);
+
+  ctx.fillStyle = cFlash ? '#ffff00' : '#ff4444';
+  ctx.shadowBlur = cFlash ? 20 : 0; ctx.shadowColor = '#ffff00';
+  ctx.textAlign = 'left';
+  ctx.fillText(cpuScore, sbX + 18, sbY + 60);
+  ctx.shadowBlur = 0;
+}
+
+function drawTurnIndicator() {
+  let msg = '';
+  let col = '#aaaaaa';
+  if (gameState === STATE.PLAYER_TURN)   { msg = '>> YOUR TURN <<'; col = '#00ffff'; }
+  else if (gameState === STATE.CPU_TURN) { msg = 'CPU THINKING...'; col = '#ff8888'; }
+  else if (gameState === STATE.BALL_FLYING) {
+    msg = whose_turn === 'player' ? 'YOUR SHOT' : 'CPU SHOT';
+    col = whose_turn === 'player' ? '#00ffff' : '#ff8888';
+  }
+  ctx.font = '7px "Press Start 2P"';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = col;
+  ctx.shadowBlur = 8; ctx.shadowColor = col;
+  ctx.fillText(msg, W / 2, 108);
+  ctx.shadowBlur = 0;
+}
+
+function drawAngleDisplay() {
+  if (gameState !== STATE.PLAYER_TURN) return;
+  ctx.fillStyle = 'rgba(0,0,0,0.65)';
+  ctx.fillRect(PLAYER_X - 28, PLAYER_Y - 90, 84, 22);
+  ctx.font = '7px "Press Start 2P"';
+  ctx.fillStyle = '#00ffff';
+  ctx.textAlign = 'center';
+  ctx.fillText(`ANG: ${Math.round(aimAngle)}°`, PLAYER_X + 14, PLAYER_Y - 74);
+}
+
+function drawControlsHint() {
+  if (gameState !== STATE.PLAYER_TURN) return;
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(W - 190, H - 82, 185, 76);
+  ctx.font = '6px "Press Start 2P"';
+  ctx.fillStyle = '#6688aa';
+  ctx.textAlign = 'left';
+  ctx.fillText('◄ ►  : AIM ANGLE', W - 183, H - 64);
+  ctx.fillText('SPACE : CHARGE POWER', W - 183, H - 49);
+  ctx.fillText('RELEASE : SHOOT', W - 183, H - 34);
+  ctx.fillText('FIRST TO 21 WINS!', W - 183, H - 17);
+}
+
+function drawParticles() {
+  ctx.save();
+  for (const p of particles) {
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle = p.color;
+    ctx.shadowBlur = 6; ctx.shadowColor = p.color;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+  ctx.restore();
+}
+
+function drawPopup() {
+  if (popup.timer <= 0) return;
+  const alpha  = Math.min(1, popup.timer / 20);
+  const yOff   = (90 - popup.timer) * 0.6;
+  const scale  = 0.8 + Math.min(0.2, popup.timer / 90 * 0.2);
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.translate(popup.x, popup.y - yOff);
+  ctx.scale(scale, scale);
+  ctx.font = '20px "Press Start 2P"';
+  ctx.textAlign = 'center';
+  ctx.shadowBlur = 22; ctx.shadowColor = popup.color;
+  ctx.fillStyle = popup.color;
+  ctx.fillText(popup.text, 0, 0);
+  ctx.shadowBlur = 0;
+  ctx.restore();
+}
+
+function drawMenuScreen() {
+  ctx.fillStyle = 'rgba(0,0,20,0.88)';
+  ctx.fillRect(0, 0, W, H);
+
+  // Title
+  ctx.font = '30px "Press Start 2P"';
+  ctx.textAlign = 'center';
+  ctx.shadowBlur = 28; ctx.shadowColor = '#00ffff';
+  ctx.fillStyle = '#00ffff';
+  ctx.fillText('STREET BALL', W/2, H/2 - 80);
+  ctx.fillStyle = '#ff6600'; ctx.shadowColor = '#ff6600';
+  ctx.font = '44px "Press Start 2P"';
+  ctx.fillText('21', W/2, H/2 - 22);
+  ctx.shadowBlur = 0;
+
+  ctx.font = '7px "Press Start 2P"';
+  ctx.fillStyle = '#7788bb';
+  ctx.fillText('RETRO STREET BASKETBALL', W/2, H/2 + 18);
+
+  if (Math.floor(Date.now() / 500) % 2 === 0) {
+    ctx.font = '10px "Press Start 2P"';
+    ctx.fillStyle = '#ffff00';
+    ctx.shadowBlur = 10; ctx.shadowColor = '#ffff00';
+    ctx.fillText('PRESS ENTER TO PLAY', W/2, H/2 + 58);
+    ctx.shadowBlur = 0;
+  }
+
+  ctx.font = '6px "Press Start 2P"';
+  ctx.fillStyle = '#445566';
+  ctx.fillText('ALL BASKETS = 2 PTS  |  FIRST TO 21 WINS', W/2, H/2 + 95);
+  ctx.fillText('YOU SHOOT FIRST EVERY GAME', W/2, H/2 + 112);
+}
+
+function drawGameOverScreen() {
+  ctx.fillStyle = 'rgba(0,0,20,0.9)';
+  ctx.fillRect(0, 0, W, H);
+
+  const playerWon = playerScore >= WINNING_SCORE;
+  const winner    = playerWon ? 'YOU WIN!' : 'CPU WINS!';
+  const winColor  = playerWon ? '#00ffff' : '#ff4444';
+
+  ctx.font = '28px "Press Start 2P"';
+  ctx.textAlign = 'center';
+  ctx.shadowBlur = 30; ctx.shadowColor = winColor;
+  ctx.fillStyle = winColor;
+  ctx.fillText(winner, W/2, H/2 - 65);
+  ctx.shadowBlur = 0;
+
+  ctx.font = '11px "Press Start 2P"';
+  ctx.fillStyle = '#4488ff';
+  ctx.fillText(`YOU: ${playerScore}`, W/2 - 90, H/2 + 5);
+  ctx.fillStyle = '#888';
+  ctx.fillText('vs', W/2, H/2 + 5);
+  ctx.fillStyle = '#ff4444';
+  ctx.fillText(`CPU: ${cpuScore}`, W/2 + 90, H/2 + 5);
+
+  if (Math.floor(Date.now() / 500) % 2 === 0) {
+    ctx.font = '8px "Press Start 2P"';
+    ctx.fillStyle = '#ffff00';
+    ctx.shadowBlur = 8; ctx.shadowColor = '#ffff00';
+    ctx.fillText('PRESS ENTER TO PLAY AGAIN', W/2, H/2 + 65);
+    ctx.shadowBlur = 0;
+  }
+}
+
+// ─── MAIN RENDER ─────────────────────────────────────────────────────────────
+function render() {
+  ctx.save();
+  ctx.translate(shakeX, shakeY);
+
+  drawBackground();
+  drawCrowd();
+  drawFloor();
+  drawLampPost(255);
+  drawLampPost(545);
+  drawHoop(CPU_HOOP,    'right');
+  drawHoop(PLAYER_HOOP, 'left');
+
+  if (gameState !== STATE.MENU) {
+    drawPlayerFigure(PLAYER_X, PLAYER_Y, true);
+    drawPlayerFigure(CPU_X,    CPU_Y,    false);
+  }
+
+  drawAimArc();
+  drawBall();
+  drawParticles();
+  drawPowerMeter();
+
+  if (gameState !== STATE.MENU && gameState !== STATE.GAME_OVER) {
+    drawScoreboard();
+    drawTurnIndicator();
+    drawAngleDisplay();
+    drawControlsHint();
+  }
+
+  drawPopup();
+  ctx.restore();
+
+  if (gameState === STATE.MENU)      drawMenuScreen();
+  if (gameState === STATE.GAME_OVER) drawGameOverScreen();
+}
+
+// ─── GAME LOOP ───────────────────────────────────────────────────────────────
+function gameLoop() {
+  update();
+  render();
+  requestAnimationFrame(gameLoop);
+}
+
+// Initial ball position for menu display
+ball.x = W / 2;
+ball.y = FLOOR_Y - 20;
+
+gameLoop();
+</script>
+</body>
+</html>
