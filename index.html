@@ -213,35 +213,61 @@ const BALL_R = 12;
 const FLOOR_Y = 380;
 const WINNING_SCORE = 21;
 
-// Hoops
+// Court bounds for players
+const COURT_LEFT = 40;
+const COURT_RIGHT = W - 40;
+
+// Hoops. Player attacks RIGHT (CPU_HOOP), CPU attacks LEFT (PLAYER_HOOP).
 const CPU_HOOP  = { backboardX: 720, rimY: 220, rimX1: 660, rimX2: 700 };
 const PLAYER_HOOP = { backboardX: 80,  rimY: 220, rimX1: 100, rimX2: 140 };
 
-// Player/CPU positions
-const PLAYER_X = 200;
-const PLAYER_Y = FLOOR_Y - 60;
-const CPU_X = 580;
-const CPU_Y = FLOOR_Y - 60;
+// Player physics constants
+const P_W = 28, P_H = 60;
+const RUN_ACCEL = 0.9;
+const RUN_MAX = 4.4;
+const FRICTION = 0.78;
+const JUMP_V = -8.6;
+
+function hoopCenter(h) { return { x: (h.rimX1 + h.rimX2) / 2, y: h.rimY }; }
+// Three-point distance (matches the drawn arcs of radius 160)
+const THREE_DIST = 158;
 
 // ─── GAME STATE ──────────────────────────────────────────────────────────────
 const STATE = {
-  MENU: 'MENU', PLAYER_TURN: 'PLAYER_TURN', CPU_TURN: 'CPU_TURN',
-  BALL_FLYING: 'BALL_FLYING', GAME_OVER: 'GAME_OVER'
+  MENU: 'MENU', PLAYING: 'PLAYING', GAME_OVER: 'GAME_OVER'
 };
 let gameState = STATE.MENU;
 
 let playerScore = 0;
 let cpuScore = 0;
-let whose_turn = 'player'; // 'player' or 'cpu'
+
+// possession: 'player' | 'cpu' | 'loose'
+let possession = 'loose';
+// who last shot/touched the ball (for out-of-bounds awarding)
+let lastShooter = 'player';
+// who the current live shot belongs to (the attacker at release) — drives which hoop scores
+let shotOwner = null;
+
+// Entities
+function makeEntity(x, dir) {
+  return {
+    x, y: FLOOR_Y - P_H, vx: 0, vy: 0,
+    onGround: true, facing: dir,
+    // animation
+    runPhase: 0, shootAnim: 0, jumpAnim: 0,
+    // cooldowns
+    stealCd: 0, shootCd: 0,
+    // shooting (player charge)
+    charging: false, power: 0
+  };
+}
+let player = makeEntity(200, 1);
+let cpu = makeEntity(580, -1);
 
 // Ball
-let ball = { x: 0, y: 0, vx: 0, vy: 0, rotation: 0, active: false };
+let ball = { x: 0, y: 0, vx: 0, vy: 0, rotation: 0, active: false, settleTimer: 0 };
 let ballTrail = [];
-
-// Player aim
-let aimAngle = 55; // degrees
-let power = 0;
-let charging = false;
+let dribblePhase = 0;
 
 // Screen shake
 let shakeX = 0, shakeY = 0, shakeMag = 0;
@@ -255,8 +281,17 @@ let popup = { text: '', x: 0, y: 0, timer: 0, color: '#fff' };
 // Score flash
 let scoreFlash = { who: '', timer: 0 };
 
-// CPU turn timer
-let cpuTimer = 0;
+// "Check ball" pause after a make (brief, not a freeze)
+let checkTimer = 0;
+// Pending change-of-possession after a make/miss/OOB. checkPending = side to
+// receive the ball; checkDelay counts down before we hand it over (lets the
+// scoring/miss FX breathe without a freeze).
+let checkPending = null;
+let checkDelay = 0;
+// X position where the live shot was released (drives 2 vs 3 point scoring).
+let shotReleaseX = 0;
+// Whether the current loose-shot's miss has been registered (streak reset).
+let missRegistered = false;
 
 // ─── ARCADE STATE (combos, fire, announcer, juice, clock, difficulty) ────────
 // Combo / fire mode tracked per shooter
@@ -290,18 +325,19 @@ let confetti = [];
 // Track whether the current shot touched the rim (for swish detection)
 let touchedRim = false;
 
-// Shot clock (frames; 60fps). 10s = 600 frames.
-const SHOT_CLOCK_MAX = 600;
+// Shot clock (frames; 60fps). Possession clock — violation = turnover.
+const SHOT_CLOCK_MAX = 14 * 60;
 let shotClock = SHOT_CLOCK_MAX;
 let lastClockBeepSec = -1;
 
-// Difficulty
+// Difficulty: accuracy = base shot scatter; speed/aggression scale CPU.
 const DIFFICULTIES = [
-  { name: 'ROOKIE',  noise: 16, lateNoise: 11 },
-  { name: 'PRO',     noise: 12, lateNoise: 7  },
-  { name: 'ALL-STAR',noise: 8,  lateNoise: 4  }
+  { name: 'ROOKIE',  acc: 0.55, speed: 0.78, aggr: 0.5, steal: 0.004, contest: 0.5 },
+  { name: 'PRO',     acc: 0.74, speed: 0.92, aggr: 0.8, steal: 0.010, contest: 0.8 },
+  { name: 'ALL-STAR',acc: 0.88, speed: 1.04, aggr: 1.0, steal: 0.018, contest: 1.0 }
 ];
 let difficultyIndex = 1;
+function diff() { return DIFFICULTIES[difficultyIndex]; }
 
 // Menu demo ball
 let demoBall = { x: W/2, y: FLOOR_Y - 20, vy: 0 };
@@ -354,30 +390,38 @@ function onKeyDown(code) {
     if (code === 'ArrowUp')   { difficultyIndex = Math.max(0, difficultyIndex - 1); playBeep(660); return; }
     if (code === 'ArrowDown') { difficultyIndex = Math.min(DIFFICULTIES.length - 1, difficultyIndex + 1); playBeep(660); return; }
     if (code === 'Enter') { startGame(); return; }
+    return;
   }
   if (gameState === STATE.GAME_OVER && code === 'Enter') { startGame(); return; }
-  if (gameState === STATE.PLAYER_TURN) {
-    if (code === 'ArrowLeft')  aimAngle = Math.min(85, aimAngle + 2);
-    if (code === 'ArrowRight') aimAngle = Math.max(10, aimAngle - 2);
-    if (code === 'Space') charging = true;
+  if (gameState !== STATE.PLAYING) return;
+
+  // Jump
+  if ((code === 'ArrowUp' || code === 'KeyW') && player.onGround) {
+    player.vy = JUMP_V; player.onGround = false; player.jumpAnim = 1;
+  }
+  // Space: shoot (if holding) or defensive action (steal/block)
+  if (code === 'Space') {
+    if (possession === 'player') {
+      player.charging = true;
+    } else {
+      attemptDefense(player, cpu);
+    }
   }
 }
 
 function onKeyUp(code) {
-  if (gameState === STATE.PLAYER_TURN && code === 'Space' && charging) {
-    charging = false;
-    shootBall('player');
+  if (gameState !== STATE.PLAYING) return;
+  if (code === 'Space' && player.charging) {
+    player.charging = false;
+    shootBall(player, 'player');
   }
 }
 
 // ─── GAME LOGIC ──────────────────────────────────────────────────────────────
 function startGame() {
   playerScore = 0; cpuScore = 0;
-  whose_turn = 'player';
   particles = []; ballTrail = [];
   popup.timer = 0; scoreFlash.timer = 0;
-  power = 0; charging = false;
-  aimAngle = 55;
   streak = { player: 0, cpu: 0 };
   onFire = { player: false, cpu: false };
   callout.timer = 0; flash.timer = 0; hitStop = 0; crowdHype = 0;
@@ -386,71 +430,305 @@ function startGame() {
   netFx = { CPU: 0, PLAYER: 0 };
   shotClock = SHOT_CLOCK_MAX;
   lastClockBeepSec = -1;
-  resetBall();
+  player = makeEntity(200, 1);
+  cpu = makeEntity(580, -1);
+  // Clear any pending handover/check state left over from a prior game.
+  checkPending = null; checkDelay = 0; checkTimer = 0;
+  possession = 'loose'; shotOwner = null; ball.active = false;
+  // Player starts with the ball
+  giveBall('player', false);
   startBeat();
-  gameState = STATE.PLAYER_TURN;
+  gameState = STATE.PLAYING;
 }
 
-function resetBall() {
-  if (whose_turn === 'player') {
-    ball.x = PLAYER_X + 12;
-    ball.y = PLAYER_Y - 22;
-  } else {
-    ball.x = CPU_X - 12;
-    ball.y = CPU_Y - 22;
-  }
-  ball.vx = 0; ball.vy = 0;
-  ball.rotation = 0;
+// Hand the ball to a side and reset to a check spot near their defended end.
+function giveBall(who, doCheck) {
+  possession = who;
+  shotOwner = null;
   ball.active = false;
+  ball.vx = 0; ball.vy = 0; ball.settleTimer = 0;
   ballTrail = [];
-  power = 0;
-  charging = false;
-}
-
-function shootBall(shooter) {
-  ball.active = true;
-  touchedRim = false;
-  const angleRad = aimAngle * Math.PI / 180;
-  const pwr = Math.max(6, power);
-  if (shooter === 'player') {
-    ball.vx =  pwr * Math.cos(angleRad);
-    ball.vy = -pwr * Math.sin(angleRad);
-  } else {
-    ball.vx = -pwr * Math.cos(angleRad);
-    ball.vy = -pwr * Math.sin(angleRad);
+  player.charging = false; player.power = 0;
+  cpu.charging = false; cpu.power = 0;
+  cpu.aiState = 'idle';
+  if (doCheck) {
+    // Reset to check positions near center
+    if (who === 'player') { player.x = 320; cpu.x = 460; }
+    else { cpu.x = 480; player.x = 340; }
+    player.vx = 0; cpu.vx = 0;
+    player.y = FLOOR_Y - P_H; cpu.y = FLOOR_Y - P_H;
+    player.vy = 0; cpu.vy = 0;
+    player.onGround = true; cpu.onGround = true;
+    checkTimer = 50;
+    showCallout('CHECK BALL', '#00ffff', false);
   }
-  gameState = STATE.BALL_FLYING;
+  shotClock = SHOT_CLOCK_MAX;
+  lastClockBeepSec = -1;
+  attachBallToHolder();
 }
 
-// ─── CPU AI ──────────────────────────────────────────────────────────────────
-function cpuAI() {
-  const rimCX = (PLAYER_HOOP.rimX1 + PLAYER_HOOP.rimX2) / 2;
-  const rimCY = PLAYER_HOOP.rimY;
-  const startX = CPU_X - 12;
-  const startY = CPU_Y - 22;
-  const dx = Math.abs(startX - rimCX);
+function holderEntity() {
+  if (possession === 'player') return player;
+  if (possession === 'cpu') return cpu;
+  return null;
+}
 
-  // Find power for 45 degree angle (optimal range shot)
-  // x = p*cos(45)*t, at peak: t_peak = p*sin(45)/g
-  // Numerically solve: start with angle 45 and derive power
-  let bestAngle = 45;
-  // p = sqrt(dx * g / |sin(2*angle)|) but adjusted for height diff
-  let bestPow = Math.sqrt(dx * GRAVITY / Math.sin(2 * bestAngle * Math.PI / 180));
-  bestPow = Math.max(8, Math.min(18, bestPow));
+// Stick the ball to the holder's hands with a dribble bob.
+function attachBallToHolder() {
+  const h = holderEntity();
+  if (!h) return;
+  const cx = h.x;
+  const handY = h.y + 14;
+  let bob = 0;
+  if (h.onGround && Math.abs(h.vx) > 0.3) {
+    bob = Math.abs(Math.sin(dribblePhase)) * 16;
+  }
+  ball.x = cx + h.facing * 16;
+  ball.y = handY + bob;
+  ball.vx = 0; ball.vy = 0;
+  ball.rotation += 0.1;
+}
 
-  // Add noise based on difficulty (less when close to winning = more pressure clutch)
-  const diff = DIFFICULTIES[difficultyIndex];
-  const noise = cpuScore >= 15 ? diff.lateNoise : diff.noise;
-  bestAngle += (Math.random() - 0.5) * noise;
-  bestPow   += (Math.random() - 0.5) * 2.5;
-  bestAngle = Math.max(15, Math.min(75, bestAngle));
-  bestPow   = Math.max(6,  Math.min(18, bestPow));
+// Begin a shot from entity e belonging to side 'who'.
+function shootBall(e, who) {
+  if (possession !== who) return;
+  const hoop = who === 'player' ? CPU_HOOP : PLAYER_HOOP;
+  const tgt = hoopCenter(hoop);
+  const releaseX = e.x + e.facing * 14;
+  const releaseY = e.y + 6;
 
-  aimAngle = bestAngle;
-  power    = bestPow;
-  ball.x   = startX;
-  ball.y   = startY;
-  shootBall('cpu');
+  // Power: player uses charge (0..1); CPU computes accuracy-scattered ideal.
+  let pwr;
+  if (who === 'player') {
+    pwr = 0.55 + (e.power / 100) * 0.55; // multiplier on computed ideal
+  } else {
+    pwr = 1.0;
+  }
+
+  // Compute an arcing velocity that reaches the rim. Choose a flight time
+  // based on distance, then solve vx, vy from kinematics.
+  const dx = tgt.x - releaseX;
+  const dy = tgt.y - releaseY;
+  const dist = Math.abs(dx);
+  const T = Math.max(28, Math.min(70, 26 + dist * 0.10)); // frames of flight
+  let vx = dx / T;
+  let vy = (dy - 0.5 * GRAVITY * T * T) / T;
+
+  // Layup / dunk: very close to the rim → near-automatic, ignore charge.
+  const layup = dist < 90;
+  // Player charge tweaks the strength (under/over shoots if not ideal)
+  if (who === 'player' && !layup) {
+    vx *= pwr; vy *= pwr;
+  }
+
+  // Accuracy scatter (CPU based on difficulty; player tiny base scatter)
+  let scatter;
+  if (who === 'cpu') {
+    const a = diff().acc;
+    scatter = (1 - a) * 0.9;
+    if (cpuScore >= 15) scatter *= 0.7; // clutch
+  } else {
+    // Player accuracy depends on how close charge is to ideal (1.0) and contest
+    const chargeErr = Math.abs(pwr - 1.0);
+    scatter = 0.05 + chargeErr * 0.6;
+    if (isContested(player, cpu)) scatter += 0.18;
+  }
+  if (layup) scatter = isContested(e, e === player ? cpu : player) ? 0.18 : 0.04;
+  vx += (Math.random() - 0.5) * scatter * 3.2;
+  vy += (Math.random() - 0.5) * scatter * 3.2;
+
+  ball.x = releaseX; ball.y = releaseY;
+  ball.vx = vx; ball.vy = vy;
+  ball.active = true;
+  ball.settleTimer = 0;
+  touchedRim = false;
+  missRegistered = false;
+  shotReleaseX = releaseX;
+  possession = 'loose';
+  shotOwner = who;
+  lastShooter = who;
+  e.shootAnim = 1;
+  e.shootCd = 24;
+  ballTrail = [];
+  playBounce();
+}
+
+// Is the shooter being contested (defender close & in the air or very near)?
+function isContested(shooter, defender) {
+  const dx = Math.abs(shooter.x - defender.x);
+  const dy = Math.abs(shooter.y - defender.y);
+  return dx < 46 && dy < 70;
+}
+
+// Defensive action: steal if near ball-handler on ground; block if jumping near shooter/ball.
+function attemptDefense(me, opp) {
+  if (me.stealCd > 0) return;
+  me.stealCd = 30;
+  // Block: if airborne and near a live shot in the air
+  if (!me.onGround && ball.active && shotOwner && shotOwner !== sideOf(me)) {
+    const dx = Math.abs(ball.x - me.x);
+    const dy = Math.abs(ball.y - (me.y + 6));
+    if (dx < 34 && dy < 40) {
+      // Knock loose
+      ball.vx = (ball.x < me.x ? -1 : 1) * 3 + (Math.random()-0.5)*2;
+      ball.vy = 2 + Math.random()*2;
+      touchedRim = true;
+      shotOwner = null;
+      shakeMag = 6;
+      showCallout('REJECTED!', '#00ffff', false);
+      playBounce();
+      return;
+    }
+  }
+  // Steal: opponent holds ball and we're adjacent
+  if (possession === sideOf(opp)) {
+    const dx = Math.abs(me.x - opp.x);
+    if (dx < 40 && me.onGround) {
+      const chance = sideOf(me) === 'player' ? 0.16 : diff().steal * 18;
+      if (Math.random() < chance) {
+        loosenBall(me.facing);
+        showCallout('STEAL!', '#ffff00', false);
+        playBounce();
+      }
+    }
+  }
+}
+
+function sideOf(e) { return e === player ? 'player' : 'cpu'; }
+
+// Knock the held ball loose with a small pop.
+function loosenBall(dir) {
+  const h = holderEntity();
+  if (h) { ball.x = h.x; ball.y = h.y + 10; }
+  ball.vx = (dir || 1) * (2 + Math.random()*2);
+  ball.vy = -2 - Math.random()*2;
+  ball.active = true;
+  ball.settleTimer = 0;
+  possession = 'loose';
+  shotOwner = null;
+  missRegistered = true;
+}
+
+// ─── ENTITY UPDATE ───────────────────────────────────────────────────────────
+function applyEntityPhysics(e) {
+  e.vy += GRAVITY;
+  e.x += e.vx;
+  e.y += e.vy;
+  if (e.x < COURT_LEFT) { e.x = COURT_LEFT; e.vx = 0; }
+  if (e.x > COURT_RIGHT) { e.x = COURT_RIGHT; e.vx = 0; }
+  if (e.y >= FLOOR_Y - P_H) {
+    e.y = FLOOR_Y - P_H;
+    if (!e.onGround) e.jumpAnim = 0;
+    e.vy = 0; e.onGround = true;
+  } else {
+    e.onGround = false;
+  }
+  if (e.onGround) {
+    e.vx *= FRICTION;
+    if (Math.abs(e.vx) < 0.1) e.vx = 0;
+    if (Math.abs(e.vx) > 0.3) e.runPhase += 0.3; else e.runPhase = 0;
+  }
+  if (e.stealCd > 0) e.stealCd--;
+  if (e.shootCd > 0) e.shootCd--;
+  if (e.shootAnim > 0) e.shootAnim = Math.max(0, e.shootAnim - 0.08);
+}
+
+function updatePlayerControls() {
+  if (checkTimer > 0) return; // brief check pause, no movement
+  if (keys['ArrowLeft'])  { player.vx -= RUN_ACCEL; player.facing = -1; }
+  if (keys['ArrowRight']) { player.vx += RUN_ACCEL; player.facing = 1; }
+  player.vx = Math.max(-RUN_MAX, Math.min(RUN_MAX, player.vx));
+  if (player.charging && possession === 'player') {
+    player.power = Math.min(100, player.power + 2.2);
+  }
+}
+
+// ─── CPU AI (state machine) ─────────────────────────────────────────────────
+function updateCpuAI() {
+  if (checkTimer > 0) return;
+  const d = diff();
+  const spd = RUN_ACCEL * d.speed;
+  const myHoop = PLAYER_HOOP;             // CPU attacks left
+  const defHoop = CPU_HOOP;               // CPU defends right
+  const tgt = hoopCenter(myHoop);
+
+  if (possession === 'cpu') {
+    // OFFENSE: drive toward left hoop, avoid defender, shoot when in range/open
+    cpu.facing = -1;
+    const distToRim = Math.abs(cpu.x - tgt.x);
+    const contested = isContested(cpu, player);
+    const inRange = distToRim < 270;
+    const goodSpot = distToRim < 200 && distToRim > 70;
+
+    // Decide to shoot
+    if (cpu.shootCd <= 0 && cpu.onGround) {
+      const wantShoot =
+        (goodSpot && (!contested || Math.random() < 0.02 * d.aggr)) ||
+        (distToRim < 110 && Math.random() < 0.05) || // drive layup
+        (inRange && !contested && Math.random() < 0.025 * d.aggr);
+      if (wantShoot) {
+        // jump shot unless very close (layup) — jump if defender contesting
+        if (contested || distToRim > 130) { cpu.vy = JUMP_V; cpu.onGround = false; cpu.jumpAnim = 1; }
+        shootBall(cpu, 'cpu');
+        return;
+      }
+    }
+
+    // Movement: drive toward rim but keep a small standoff if defender directly between
+    let aimX = tgt.x + 90; // shoot from a bit out from the rim
+    if (distToRim < 150) aimX = tgt.x + 110;
+    const desired = aimX;
+    if (cpu.x > desired + 6) cpu.vx -= spd;
+    else if (cpu.x < desired - 6) cpu.vx += spd;
+    // juke: if defender very close, randomly burst opposite
+    if (Math.abs(cpu.x - player.x) < 34 && Math.random() < 0.04 * d.aggr) {
+      cpu.vx += (Math.random() < 0.5 ? -1 : 1) * spd * 3;
+    }
+  } else if (possession === 'player') {
+    // DEFENSE: stay between player and the right hoop (CPU's defended end)
+    cpu.facing = player.x < cpu.x ? -1 : 1;
+    const guardX = (player.x + hoopCenter(defHoop).x) / 2 + 18;
+    if (cpu.x > guardX + 8) cpu.vx -= spd;
+    else if (cpu.x < guardX - 8) cpu.vx += spd;
+    // Contest: jump if player is shooting (charging) and close
+    if (player.charging && Math.abs(cpu.x - player.x) < 60 && cpu.onGround
+        && Math.random() < 0.06 * d.contest) {
+      cpu.vy = JUMP_V; cpu.onGround = false; cpu.jumpAnim = 1;
+    }
+    // Steal attempt when adjacent
+    if (Math.abs(cpu.x - player.x) < 38 && cpu.stealCd <= 0 && Math.random() < d.steal) {
+      attemptDefense(cpu, player);
+    }
+  } else {
+    // LOOSE: chase the ball
+    cpu.facing = ball.x < cpu.x ? -1 : 1;
+    if (cpu.x > ball.x + 6) cpu.vx -= spd;
+    else if (cpu.x < ball.x - 6) cpu.vx += spd;
+    // jump for a high loose ball
+    if (ball.y < FLOOR_Y - 90 && Math.abs(cpu.x - ball.x) < 50 && cpu.onGround && Math.random() < 0.1) {
+      cpu.vy = JUMP_V; cpu.onGround = false; cpu.jumpAnim = 1;
+    }
+  }
+  cpu.vx = Math.max(-RUN_MAX * d.speed, Math.min(RUN_MAX * d.speed, cpu.vx));
+}
+
+// ─── REBOUND / PICKUP ─────────────────────────────────────────────────────────
+function tryPickup(e, who) {
+  if (possession !== 'loose' || !ball.active) return false;
+  // Can't immediately re-grab your own shot until it's clearly missed (settle window handles that)
+  const dx = Math.abs(ball.x - e.x);
+  const dy = ball.y - (e.y + 6);
+  if (dx < 24 && dy > -30 && dy < 50) {
+    possession = who;
+    lastShooter = who;
+    ball.active = false;
+    ball.settleTimer = 0;
+    shotOwner = null;
+    shotClock = SHOT_CLOCK_MAX;
+    lastClockBeepSec = -1;
+    return true;
+  }
+  return false;
 }
 
 // ─── PARTICLES ───────────────────────────────────────────────────────────────
@@ -521,7 +799,7 @@ function spawnFireParticle(x, y) {
 // ─── PHYSICS & COLLISION ─────────────────────────────────────────────────────
 function checkScore(hoop) {
   // Fire mode gives the shooter a slightly wider rim tolerance (small bonus).
-  const fireBonus = onFire[whose_turn] ? 2 : 0;
+  const fireBonus = (shotOwner && onFire[shotOwner]) ? 2 : 0;
   const inner1 = hoop.rimX1 + 4 - fireBonus;
   const inner2 = hoop.rimX2 - 4 + fireBonus;
   // Use a swept vertical window equal to the ball's radius plus the rim
@@ -580,14 +858,31 @@ function updateBall() {
   ball.y  += ball.vy;
   ball.rotation += ball.vx * 0.08;
 
-  // Determine target hoop
-  const hoop = whose_turn === 'player' ? CPU_HOOP : PLAYER_HOOP;
+  // A live shot scores in the shooter's target hoop. If the ball is a stray
+  // loose ball (no shotOwner), it can still bank into either hoop and counts
+  // for whoever last touched it.
+  const targetHoop = shotOwner === 'player' ? CPU_HOOP
+                   : shotOwner === 'cpu'   ? PLAYER_HOOP
+                   : null;
 
-  // Check score first
-  if (checkScore(hoop)) {
-    const shooter = whose_turn;
+  // Score check: prefer the owner's hoop; otherwise allow either hoop for a
+  // stray ball and attribute to lastShooter.
+  let scoringHoop = null, scoringShooter = null;
+  if (targetHoop && checkScore(targetHoop)) {
+    scoringHoop = targetHoop; scoringShooter = shotOwner;
+  } else if (!targetHoop) {
+    if (checkScore(CPU_HOOP)) { scoringHoop = CPU_HOOP; scoringShooter = lastShooter; }
+    else if (checkScore(PLAYER_HOOP)) { scoringHoop = PLAYER_HOOP; scoringShooter = lastShooter; }
+  }
+
+  if (scoringHoop) {
+    const hoop = scoringHoop;
+    const shooter = scoringShooter;
     const swish = isSwish(hoop);
-    const pts = swish ? 3 : 2;
+    // 3 pts if released from beyond the three-point distance from that hoop.
+    const hc = hoopCenter(hoop);
+    const releaseDist = Math.abs(shotReleaseX - hc.x);
+    const pts = releaseDist > THREE_DIST ? 3 : 2;
     const isPlayer = shooter === 'player';
     const baseColor = isPlayer ? '#00ffff' : '#ff4444';
     const hoopKey = hoop === CPU_HOOP ? 'CPU' : 'PLAYER';
@@ -630,8 +925,10 @@ function updateBall() {
       if (isPlayer) { spawnConfetti(); }
       setTimeout(() => { playWinJingle(); playBuzzer(); gameState = STATE.GAME_OVER; }, 700);
     } else {
-      whose_turn = whose_turn === 'player' ? 'cpu' : 'player';
-      setTimeout(() => nextTurn(), 1100);
+      // Change of possession: give ball to the OTHER side at a check spot.
+      const other = isPlayer ? 'cpu' : 'player';
+      checkPending = other;
+      checkDelay = 28;
     }
     return;
   }
@@ -640,42 +937,76 @@ function updateBall() {
   checkRimCollision(CPU_HOOP);
   checkRimCollision(PLAYER_HOOP);
 
-  // Miss
-  if (ball.y > H + 20 || ball.x < -60 || ball.x > W + 60) {
-    endMiss(false);
+  // Backboard collisions
+  checkBackboardCollision(CPU_HOOP, 'right');
+  checkBackboardCollision(PLAYER_HOOP, 'left');
+
+  // Floor bounce (loose ball lives on)
+  if (ball.y > FLOOR_Y - BALL_R) {
+    ball.y = FLOOR_Y - BALL_R;
+    if (ball.vy > 1) { ball.vy = -ball.vy * 0.6; playBounce(); }
+    else { ball.vy = 0; }
+    ball.vx *= 0.92;
+    // mark the shot as a confirmed miss once it has bounced (so the shooter's
+    // streak resets) — only once per loose-ball sequence
+    if (shotOwner && !missRegistered) registerMiss();
+  }
+
+  // Side walls — bounce the ball back in so it can't be lost; treat hard exit
+  // as out of bounds turnover.
+  if (ball.x < COURT_LEFT - 30 || ball.x > COURT_RIGHT + 30) {
+    // Out of bounds: award to the side that didn't shoot it last.
+    const other = lastShooter === 'player' ? 'cpu' : 'player';
+    if (shotOwner && !missRegistered) registerMiss();
+    checkPending = other;
+    checkDelay = 10;
+    ball.active = false;
+    return;
+  }
+
+  // Settle: if the ball is basically at rest on the floor, reset to a check.
+  if (ball.active && Math.abs(ball.vx) < 0.3 && Math.abs(ball.vy) < 0.6
+      && ball.y > FLOOR_Y - BALL_R - 2) {
+    ball.settleTimer++;
+    if (ball.settleTimer > 90) {
+      // no one grabbed it — give to defender of wherever it settled
+      const other = lastShooter === 'player' ? 'cpu' : 'player';
+      checkPending = other;
+      checkDelay = 6;
+      ball.active = false;
+    }
+  } else {
+    ball.settleTimer = 0;
   }
 }
 
-// Handle a missed shot (rim-out / airball / shot-clock violation).
-function endMiss(clockViolation) {
-  const shooter = whose_turn;
+function checkBackboardCollision(hoop, side) {
+  const bbX = hoop.backboardX;
+  const top = hoop.rimY - 50, bot = hoop.rimY + 50;
+  if (ball.y < top || ball.y > bot) return;
+  if (side === 'right') {
+    if (ball.vx > 0 && ball.x + BALL_R > bbX && ball.x < bbX + 10) {
+      ball.x = bbX - BALL_R; ball.vx = -Math.abs(ball.vx) * 0.5;
+      touchedRim = true; playBounce();
+    }
+  } else {
+    if (ball.vx < 0 && ball.x - BALL_R < bbX && ball.x > bbX - 10) {
+      ball.x = bbX + BALL_R; ball.vx = Math.abs(ball.vx) * 0.5;
+      touchedRim = true; playBounce();
+    }
+  }
+}
+
+// Register a confirmed miss (resets the shooter's streak / fire) once.
+function registerMiss() {
+  missRegistered = true;
+  const shooter = shotOwner || lastShooter;
   streak[shooter] = 0;
   onFire[shooter] = false;
-  if (clockViolation) {
-    showCallout('SHOT CLOCK!', '#ff3333', false);
-  } else {
-    const calls = touchedRim ? MISS_CALLS_RIM : MISS_CALLS_AIR;
-    showCallout(calls[Math.floor(Math.random()*calls.length)], '#ff6600', false);
-  }
-  showPopup('MISS!', W / 2, H / 2 - 60, '#ff6600');
+  const calls = touchedRim ? MISS_CALLS_RIM : MISS_CALLS_AIR;
+  showCallout(calls[Math.floor(Math.random()*calls.length)], '#ff6600', false);
   playMiss();
-  ball.active = false;
-  ballTrail = [];
-  whose_turn = whose_turn === 'player' ? 'cpu' : 'player';
-  setTimeout(() => nextTurn(), 1100);
-}
-
-function nextTurn() {
-  resetBall();
-  shotClock = SHOT_CLOCK_MAX;
-  lastClockBeepSec = -1;
-  if (whose_turn === 'player') {
-    aimAngle = 55;
-    gameState = STATE.PLAYER_TURN;
-  } else {
-    gameState = STATE.CPU_TURN;
-    cpuTimer = 90; // ~1.5s
-  }
+  shotOwner = null; // becomes a true loose ball; rebound scramble
 }
 
 // ─── UPDATE ──────────────────────────────────────────────────────────────────
@@ -708,25 +1039,14 @@ function update() {
 
   updateFx();
 
-  // Shot clock (only during player aiming)
-  if (gameState === STATE.PLAYER_TURN) {
-    shotClock--;
-    const secLeft = Math.ceil(shotClock / 60);
-    if (secLeft <= 3 && secLeft > 0 && secLeft !== lastClockBeepSec) {
-      lastClockBeepSec = secLeft;
-      playBeep(secLeft === 1 ? 1320 : 990);
-    }
-    if (shotClock <= 0) {
-      charging = false;
-      gameState = STATE.BALL_FLYING; // leave PLAYER_TURN so the clock stops re-firing
-      ball.active = false;
-      endMiss(true);
-    }
-  }
-
-  // Fire-mode ball trail particles
-  if (gameState === STATE.BALL_FLYING && ball.active && onFire[whose_turn]) {
+  // Fire-mode ball trail particles (live shot by an on-fire shooter)
+  if (gameState === STATE.PLAYING && ball.active && shotOwner && onFire[shotOwner]) {
     spawnFireParticle(ball.x, ball.y);
+  }
+  // Fire aura on the on-ball holder if on fire
+  if (gameState === STATE.PLAYING && possession !== 'loose' && onFire[possession]) {
+    const h = holderEntity();
+    if (h && gameTime % 3 === 0) spawnFireParticle(h.x, h.y);
   }
 
   // Screen shake
@@ -750,19 +1070,61 @@ function update() {
   if (callout.timer > 0) callout.timer--;
   if (flash.timer > 0) flash.timer--;
 
-  if (gameState === STATE.PLAYER_TURN) {
-    if (keys['ArrowLeft'])  aimAngle = Math.min(85, aimAngle + 1.5);
-    if (keys['ArrowRight']) aimAngle = Math.max(10, aimAngle - 1.5);
-    if (charging) power = Math.min(18, power + 0.25);
+  if (gameState !== STATE.PLAYING) return;
+
+  // Brief check-ball hand-off after a make/miss/OOB.
+  if (checkDelay > 0) {
+    checkDelay--;
+    if (checkDelay === 0 && checkPending) {
+      giveBall(checkPending, true);
+      checkPending = null;
+    }
+  }
+  if (checkTimer > 0) { checkTimer--; }
+
+  // Dribble animation phase
+  dribblePhase += 0.35;
+
+  // Possession / shot clock (only while someone holds the ball)
+  if (possession !== 'loose' && checkTimer <= 0 && checkDelay <= 0) {
+    shotClock--;
+    const secLeft = Math.ceil(shotClock / 60);
+    if (secLeft <= 3 && secLeft > 0 && secLeft !== lastClockBeepSec) {
+      lastClockBeepSec = secLeft;
+      playBeep(secLeft === 1 ? 1320 : 990);
+    }
+    if (shotClock <= 0) {
+      // Shot-clock violation = turnover (NOT a freeze).
+      const offender = possession;
+      streak[offender] = 0; onFire[offender] = false;
+      showCallout('SHOT CLOCK!', '#ff3333', false);
+      checkPending = offender === 'player' ? 'cpu' : 'player';
+      checkDelay = 14;
+      possession = 'loose';
+      ball.active = false;
+    }
   }
 
-  if (gameState === STATE.CPU_TURN) {
-    cpuTimer--;
-    if (cpuTimer <= 0) cpuAI();
-  }
+  // Entity control & AI
+  updatePlayerControls();
+  updateCpuAI();
 
-  if (gameState === STATE.BALL_FLYING) {
+  // Physics for both entities
+  applyEntityPhysics(player);
+  applyEntityPhysics(cpu);
+
+  // Ball: held (stick to holder) or loose (free physics)
+  if (possession === 'loose' && ball.active) {
     updateBall();
+    // Rebound / pickup attempts (only once the ball is no longer the live
+    // upward shot — i.e., it's coming down or has been missed/loosened).
+    if (ball.active && (shotOwner === null || ball.vy > 0)) {
+      // The shooter can't instantly re-grab their own rising shot.
+      tryPickup(player, 'player');
+      if (possession === 'loose') tryPickup(cpu, 'cpu');
+    }
+  } else if (possession !== 'loose') {
+    attachBallToHolder();
   }
 }
 
@@ -980,25 +1342,46 @@ function drawCrowd() {
   }
 }
 
-function drawPlayerFigure(x, y, isPlayer) {
-  const bodyColor  = isPlayer ? '#2255ff' : '#cc1111';
-  const skinColor  = '#f5c5a0';
+// Draw an entity with run / jump / shoot poses derived from its state.
+function drawPlayerFigure(e, isPlayer) {
+  const x = e.x, y = e.y;
+  const bodyColor   = isPlayer ? '#2255ff' : '#cc1111';
+  const skinColor   = '#f5c5a0';
   const shortsColor = isPlayer ? '#ffffff' : '#222222';
+  const f = e.facing || 1;
 
-  // Shadow
-  ctx.fillStyle = 'rgba(0,0,0,0.3)';
-  ctx.beginPath(); ctx.ellipse(x, y + 62, 18, 5, 0, 0, Math.PI * 2); ctx.fill();
+  const shooting = e.shootAnim > 0.05;
+  const jumping  = !e.onGround;
+  const running  = e.onGround && Math.abs(e.vx) > 0.4;
+  const legSwing = running ? Math.sin(e.runPhase) * 7 : 0;
 
-  // Shoes
-  ctx.fillStyle = isPlayer ? '#111188' : '#881111';
-  ctx.fillRect(x - 14, y + 56, 12, 7);
-  ctx.fillRect(x + 2,  y + 56, 12, 7);
+  // Shadow (shrinks while airborne)
+  const airT = jumping ? Math.max(0, Math.min(1, (FLOOR_Y - P_H - y) / 80)) : 0;
+  ctx.fillStyle = `rgba(0,0,0,${0.3 - airT * 0.2})`;
+  const groundY = jumping ? FLOOR_Y : y + 62;
+  ctx.beginPath(); ctx.ellipse(x, groundY, 18 - airT * 6, 5 - airT * 2, 0, 0, Math.PI * 2); ctx.fill();
 
   // Legs / shorts
   ctx.fillStyle = shortsColor;
-  ctx.fillRect(x - 9,  y + 28, 8, 28);
-  ctx.fillRect(x + 1,  y + 28, 8, 28);
+  if (jumping) {
+    // tucked legs
+    ctx.fillRect(x - 9, y + 26, 8, 20);
+    ctx.fillRect(x + 1, y + 26, 8, 20);
+  } else {
+    ctx.fillRect(x - 9 - legSwing, y + 28, 8, 28);
+    ctx.fillRect(x + 1 + legSwing, y + 28, 8, 28);
+  }
   ctx.fillRect(x - 12, y + 22, 24, 10);
+
+  // Shoes
+  ctx.fillStyle = isPlayer ? '#111188' : '#881111';
+  if (jumping) {
+    ctx.fillRect(x - 13, y + 44, 12, 6);
+    ctx.fillRect(x + 1,  y + 44, 12, 6);
+  } else {
+    ctx.fillRect(x - 15 - legSwing, y + 56, 12, 7);
+    ctx.fillRect(x + 3 + legSwing,  y + 56, 12, 7);
+  }
 
   // Body/jersey
   ctx.fillStyle = bodyColor;
@@ -1006,10 +1389,13 @@ function drawPlayerFigure(x, y, isPlayer) {
 
   // Arms
   ctx.fillStyle = skinColor;
-  if (isPlayer) {
-    // Right arm raised for shooting
-    ctx.fillRect(x + 11, y - 8, 7, 22);
-    ctx.fillRect(x - 18, y + 4, 7, 15);
+  if (shooting || (jumping && (possession === sideOf(e)))) {
+    // both arms up (shooting / going for layup-dunk)
+    ctx.fillRect(x + f * 8 - 3, y - 18, 7, 26);
+    ctx.fillRect(x - f * 14 - 3, y - 6, 7, 18);
+  } else if (running) {
+    ctx.fillRect(x + 11, y + 2 + legSwing, 7, 15);
+    ctx.fillRect(x - 18, y + 2 - legSwing, 7, 15);
   } else {
     ctx.fillRect(x + 11, y + 2, 7, 16);
     ctx.fillRect(x - 18, y + 2, 7, 16);
@@ -1031,10 +1417,7 @@ function drawPlayerFigure(x, y, isPlayer) {
 }
 
 function drawBall() {
-  const shouldDraw = ball.active ||
-    gameState === STATE.PLAYER_TURN ||
-    gameState === STATE.CPU_TURN;
-  if (!shouldDraw) return;
+  if (gameState !== STATE.PLAYING) return;
 
   // Trail
   for (let i = 0; i < ballTrail.length; i++) {
@@ -1044,7 +1427,8 @@ function drawBall() {
     ctx.beginPath(); ctx.arc(ballTrail[i].x, ballTrail[i].y, r, 0, Math.PI * 2); ctx.fill();
   }
 
-  const fired = onFire[whose_turn] && (ball.active || gameState === STATE.PLAYER_TURN || gameState === STATE.CPU_TURN);
+  const fireSide = shotOwner || (possession !== 'loose' ? possession : null);
+  const fired = fireSide && onFire[fireSide];
   ctx.save();
   ctx.shadowBlur = fired ? 28 + Math.random()*8 : 15;
   ctx.shadowColor = fired ? '#ff3300' : '#ff6600';
@@ -1073,68 +1457,28 @@ function drawBall() {
 }
 
 function drawAimArc() {
-  if (gameState !== STATE.PLAYER_TURN) return;
-  const angleRad = aimAngle * Math.PI / 180;
-  const pwr = Math.max(6, power);
-  const vx0 =  pwr * Math.cos(angleRad);
-  const vy0 = -pwr * Math.sin(angleRad);
-
-  ctx.strokeStyle = 'rgba(0,255,255,0.45)';
-  ctx.setLineDash([4, 5]);
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  let first = true;
-  for (let t = 0; t < 60; t += 2) {
-    const px = ball.x + vx0 * t;
-    const py = ball.y + vy0 * t + 0.5 * GRAVITY * t * t;
-    if (py > FLOOR_Y || px > W) break;
-    if (first) { ctx.moveTo(px, py); first = false; }
-    else ctx.lineTo(px, py);
-  }
-  ctx.stroke();
-  ctx.setLineDash([]);
-
-  // Dots
-  for (let i = 1; i <= 6; i++) {
-    const t  = i * 7;
-    const px = ball.x + vx0 * t;
-    const py = ball.y + vy0 * t + 0.5 * GRAVITY * t * t;
-    if (py > FLOOR_Y || px > W) break;
-    ctx.fillStyle = `rgba(0,255,255,${0.9 - i * 0.12})`;
-    ctx.beginPath(); ctx.arc(px, py, 3, 0, Math.PI * 2); ctx.fill();
-  }
-}
-
-function drawPowerMeter() {
-  if (gameState !== STATE.PLAYER_TURN) return;
-  const mx = 28, my = 190, mw = 18, mh = 150;
-
-  ctx.fillStyle = 'rgba(0,0,0,0.75)';
-  ctx.fillRect(mx - 3, my - 3, mw + 6, mh + 6);
-
-  const fillH = (power / 18) * mh;
-  const pct = power / 18;
+  // Show a charge power indicator above the player while charging a shot.
+  if (gameState !== STATE.PLAYING) return;
+  if (!(player.charging && possession === 'player')) return;
+  const bx = player.x, by = player.y - 34;
+  const pct = player.power / 100;
+  // Power bar
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(bx - 22, by, 44, 7);
   const rr = Math.floor(pct * 255);
-  const gg = Math.floor((1 - pct) * 200);
-  ctx.fillStyle = `rgb(${rr},${gg},0)`;
-  ctx.fillRect(mx, my + mh - fillH, mw, fillH);
-
-  ctx.strokeStyle = '#00ffff'; ctx.lineWidth = 2;
-  ctx.strokeRect(mx, my, mw, mh);
-
-  ctx.fillStyle = '#ffffff';
-  ctx.font = '6px "Press Start 2P"';
-  ctx.textAlign = 'center';
-  ctx.fillText('PWR', mx + mw/2, my + mh + 16);
-
-  if (charging) {
-    ctx.fillStyle = '#ffff00';
-    ctx.shadowBlur = 8; ctx.shadowColor = '#ffff00';
-    ctx.font = '8px "Press Start 2P"';
-    ctx.fillText('!', mx + mw/2, my - 12);
-    ctx.shadowBlur = 0;
-  }
+  const gg = Math.floor((1 - Math.abs(pct - 0.85)) * 220);
+  ctx.fillStyle = `rgb(${rr},${gg},40)`;
+  ctx.fillRect(bx - 21, by + 1, 42 * pct, 5);
+  // Sweet-spot marker (~85% = ideal)
+  ctx.strokeStyle = '#00ffff'; ctx.lineWidth = 1.5;
+  ctx.strokeRect(bx - 22, by, 44, 7);
+  ctx.fillStyle = '#00ffff';
+  ctx.fillRect(bx - 22 + 44 * 0.85, by - 2, 2, 11);
+  ctx.restore();
 }
+
+function drawPowerMeter() { /* charge indicator handled in drawAimArc */ }
 
 function drawScoreboard() {
   const sbX = W / 2, sbY = 14;
@@ -1180,14 +1524,11 @@ function drawScoreboard() {
 }
 
 function drawTurnIndicator() {
-  let msg = '';
-  let col = '#aaaaaa';
-  if (gameState === STATE.PLAYER_TURN)   { msg = '>> YOUR TURN <<'; col = '#00ffff'; }
-  else if (gameState === STATE.CPU_TURN) { msg = 'CPU THINKING...'; col = '#ff8888'; }
-  else if (gameState === STATE.BALL_FLYING) {
-    msg = whose_turn === 'player' ? 'YOUR SHOT' : 'CPU SHOT';
-    col = whose_turn === 'player' ? '#00ffff' : '#ff8888';
-  }
+  let msg = '', col = '#aaaaaa';
+  if (checkTimer > 0)              { msg = 'CHECK BALL'; col = '#00ffff'; }
+  else if (possession === 'player'){ msg = '>> YOU ON OFFENSE <<'; col = '#00ffff'; }
+  else if (possession === 'cpu')   { msg = 'CPU ON OFFENSE'; col = '#ff8888'; }
+  else                             { msg = 'LOOSE BALL!'; col = '#ffff00'; }
   ctx.font = '7px "Press Start 2P"';
   ctx.textAlign = 'center';
   ctx.fillStyle = col;
@@ -1196,27 +1537,19 @@ function drawTurnIndicator() {
   ctx.shadowBlur = 0;
 }
 
-function drawAngleDisplay() {
-  if (gameState !== STATE.PLAYER_TURN) return;
-  ctx.fillStyle = 'rgba(0,0,0,0.65)';
-  ctx.fillRect(PLAYER_X - 28, PLAYER_Y - 90, 84, 22);
-  ctx.font = '7px "Press Start 2P"';
-  ctx.fillStyle = '#00ffff';
-  ctx.textAlign = 'center';
-  ctx.fillText(`ANG: ${Math.round(aimAngle)}°`, PLAYER_X + 14, PLAYER_Y - 74);
-}
+function drawAngleDisplay() { /* not used in real-time mode */ }
 
 function drawControlsHint() {
-  if (gameState !== STATE.PLAYER_TURN) return;
+  if (gameState !== STATE.PLAYING) return;
   ctx.fillStyle = 'rgba(0,0,0,0.55)';
-  ctx.fillRect(W - 190, H - 82, 185, 76);
+  ctx.fillRect(W - 196, H - 82, 191, 76);
   ctx.font = '6px "Press Start 2P"';
   ctx.fillStyle = '#6688aa';
   ctx.textAlign = 'left';
-  ctx.fillText('◄ ►  : AIM ANGLE', W - 183, H - 64);
-  ctx.fillText('SPACE : CHARGE POWER', W - 183, H - 49);
-  ctx.fillText('RELEASE : SHOOT', W - 183, H - 34);
-  ctx.fillText('FIRST TO 21 WINS!', W - 183, H - 17);
+  ctx.fillText('◄ ► : RUN', W - 189, H - 64);
+  ctx.fillText('▲/W : JUMP', W - 189, H - 49);
+  ctx.fillText('SPACE: SHOOT / STEAL / BLOCK', W - 189, H - 34);
+  ctx.fillText('FIRST TO 21 WINS!  [M] MUTE', W - 189, H - 17);
 }
 
 function drawParticles() {
@@ -1419,7 +1752,7 @@ function drawScreenFlash() {
 }
 
 function drawShotClock() {
-  if (gameState !== STATE.PLAYER_TURN) return;
+  if (gameState !== STATE.PLAYING || possession === 'loose') return;
   const sec = Math.max(0, Math.ceil(shotClock / 60));
   const danger = sec <= 3;
   const blink = danger && Math.floor(gameTime / 6) % 2 === 0;
@@ -1460,21 +1793,20 @@ function render() {
   drawHoop(CPU_HOOP,    'right');
   drawHoop(PLAYER_HOOP, 'left');
 
-  if (gameState !== STATE.MENU) {
-    drawPlayerFigure(PLAYER_X, PLAYER_Y, true);
-    drawPlayerFigure(CPU_X,    CPU_Y,    false);
+  if (gameState === STATE.PLAYING) {
+    // Draw the back player first for depth (the one further from camera-ish).
+    drawPlayerFigure(player, true);
+    drawPlayerFigure(cpu,    false);
   }
 
   drawAimArc();
   drawBall();
   drawParticles();
-  drawPowerMeter();
 
-  if (gameState !== STATE.MENU && gameState !== STATE.GAME_OVER) {
+  if (gameState === STATE.PLAYING) {
     drawScoreboard();
     drawTurnIndicator();
     drawShotClock();
-    drawAngleDisplay();
     drawControlsHint();
   }
 
