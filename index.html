@@ -33,8 +33,21 @@ const W = 800, H = 500;
 
 // ─── AUDIO ──────────────────────────────────────────────────────────────────
 let audioCtx = null;
+let masterGain = null;
+let muted = false;
 function ensureAudio() {
-  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = muted ? 0 : 1;
+    masterGain.connect(audioCtx.destination);
+  }
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+}
+function audioOut() { return masterGain || audioCtx.destination; }
+function toggleMute() {
+  muted = !muted;
+  if (masterGain) masterGain.gain.value = muted ? 0 : 1;
 }
 function playBounce() {
   ensureAudio();
@@ -44,7 +57,7 @@ function playBounce() {
   osc.frequency.setValueAtTime(180, audioCtx.currentTime);
   gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
   gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.08);
-  osc.connect(gain); gain.connect(audioCtx.destination);
+  osc.connect(gain); gain.connect(audioOut());
   osc.start(); osc.stop(audioCtx.currentTime + 0.08);
 }
 function playScore() {
@@ -56,7 +69,7 @@ function playScore() {
   osc.frequency.exponentialRampToValueAtTime(150, audioCtx.currentTime + 0.25);
   gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
   gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.25);
-  osc.connect(gain); gain.connect(audioCtx.destination);
+  osc.connect(gain); gain.connect(audioOut());
   osc.start(); osc.stop(audioCtx.currentTime + 0.25);
 }
 function playMiss() {
@@ -67,7 +80,7 @@ function playMiss() {
   osc.frequency.setValueAtTime(80, audioCtx.currentTime);
   gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
   gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.2);
-  osc.connect(gain); gain.connect(audioCtx.destination);
+  osc.connect(gain); gain.connect(audioOut());
   osc.start(); osc.stop(audioCtx.currentTime + 0.2);
 }
 function playWinJingle() {
@@ -81,10 +94,117 @@ function playWinJingle() {
     gain.gain.setValueAtTime(0, audioCtx.currentTime + i * 0.12);
     gain.gain.linearRampToValueAtTime(0.25, audioCtx.currentTime + i * 0.12 + 0.02);
     gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + i * 0.12 + 0.15);
-    osc.connect(gain); gain.connect(audioCtx.destination);
+    osc.connect(gain); gain.connect(audioOut());
     osc.start(audioCtx.currentTime + i * 0.12);
     osc.stop(audioCtx.currentTime + i * 0.12 + 0.15);
   });
+}
+function playSwish() {
+  ensureAudio();
+  const bufferSize = audioCtx.sampleRate * 0.25;
+  const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < bufferSize; i++) data[i] = (Math.random() * 2 - 1);
+  const noise = audioCtx.createBufferSource();
+  noise.buffer = buffer;
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = 'bandpass';
+  filter.frequency.setValueAtTime(4000, audioCtx.currentTime);
+  filter.frequency.exponentialRampToValueAtTime(1200, audioCtx.currentTime + 0.22);
+  filter.Q.value = 2;
+  const gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(0.35, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.22);
+  noise.connect(filter); filter.connect(gain); gain.connect(audioOut());
+  noise.start();
+}
+function playBuzzer() {
+  ensureAudio();
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = 'sawtooth';
+  osc.frequency.setValueAtTime(110, audioCtx.currentTime);
+  gain.gain.setValueAtTime(0.25, audioCtx.currentTime);
+  gain.gain.setValueAtTime(0.25, audioCtx.currentTime + 0.5);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.7);
+  osc.connect(gain); gain.connect(audioOut());
+  osc.start(); osc.stop(audioCtx.currentTime + 0.7);
+}
+function playBeep(freq) {
+  ensureAudio();
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = 'square';
+  osc.frequency.setValueAtTime(freq || 880, audioCtx.currentTime);
+  gain.gain.setValueAtTime(0.12, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.08);
+  osc.connect(gain); gain.connect(audioOut());
+  osc.start(); osc.stop(audioCtx.currentTime + 0.08);
+}
+function playFireWhoosh() {
+  ensureAudio();
+  const bufferSize = audioCtx.sampleRate * 0.5;
+  const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < bufferSize; i++) data[i] = (Math.random() * 2 - 1);
+  const noise = audioCtx.createBufferSource();
+  noise.buffer = buffer;
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.setValueAtTime(400, audioCtx.currentTime);
+  filter.frequency.exponentialRampToValueAtTime(3000, audioCtx.currentTime + 0.4);
+  const gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.5);
+  noise.connect(filter); filter.connect(gain); gain.connect(audioOut());
+  noise.start();
+}
+
+// ─── CHIPTUNE BACKGROUND BEAT ───────────────────────────────────────────────
+let beat = { playing: false, gain: null, intervalId: null, step: 0 };
+const BASSLINE = [55, 55, 82.4, 55, 73.4, 55, 82.4, 98]; // A1-based riff
+function startBeat() {
+  ensureAudio();
+  if (beat.playing) return;
+  beat.playing = true;
+  beat.step = 0;
+  beat.gain = audioCtx.createGain();
+  beat.gain.gain.value = 0.12;
+  beat.gain.connect(audioOut());
+  const stepDur = 200; // ms, ~150bpm eighth notes
+  beat.intervalId = setInterval(() => {
+    if (!audioCtx) return;
+    const t = audioCtx.currentTime;
+    // Bass
+    const bassFreq = BASSLINE[beat.step % BASSLINE.length];
+    const bosc = audioCtx.createOscillator();
+    const bg = audioCtx.createGain();
+    bosc.type = 'triangle';
+    bosc.frequency.setValueAtTime(bassFreq, t);
+    bg.gain.setValueAtTime(0.5, t);
+    bg.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
+    bosc.connect(bg); bg.connect(beat.gain);
+    bosc.start(t); bosc.stop(t + 0.18);
+    // Hi-hat-ish blip on offbeats
+    if (beat.step % 2 === 1) {
+      const hosc = audioCtx.createOscillator();
+      const hg = audioCtx.createGain();
+      hosc.type = 'square';
+      hosc.frequency.setValueAtTime(1200, t);
+      hg.gain.setValueAtTime(0.06, t);
+      hg.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
+      hosc.connect(hg); hg.connect(beat.gain);
+      hosc.start(t); hosc.stop(t + 0.05);
+    }
+    beat.step++;
+  }, stepDur);
+}
+function stopBeat() {
+  if (!beat.playing) return;
+  beat.playing = false;
+  clearInterval(beat.intervalId);
+  beat.intervalId = null;
+  if (beat.gain) { try { beat.gain.disconnect(); } catch(e){} beat.gain = null; }
 }
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
@@ -138,6 +258,57 @@ let scoreFlash = { who: '', timer: 0 };
 // CPU turn timer
 let cpuTimer = 0;
 
+// ─── ARCADE STATE (combos, fire, announcer, juice, clock, difficulty) ────────
+// Combo / fire mode tracked per shooter
+let streak = { player: 0, cpu: 0 };
+let onFire = { player: false, cpu: false };
+
+// Announcer big callout
+let callout = { text: '', timer: 0, color: '#ffff00', hot: false };
+
+// Screen flash overlay
+let flash = { timer: 0, color: '#ffffff', max: 0 };
+
+// Hit-stop / slow-motion frames remaining
+let hitStop = 0;
+
+// Rim flash + shake per hoop (keyed by hoop ref via side string)
+let rimFx = { CPU: { flash: 0, shake: 0 }, PLAYER: { flash: 0, shake: 0 } };
+
+// Net swish animation per hoop
+let netFx = { CPU: 0, PLAYER: 0 };
+
+// Crowd reaction (brighten/jump)
+let crowdHype = 0;
+
+// Floating score text (+2 / +3)
+let floaters = [];
+
+// Confetti for win celebration
+let confetti = [];
+
+// Track whether the current shot touched the rim (for swish detection)
+let touchedRim = false;
+
+// Shot clock (frames; 60fps). 10s = 600 frames.
+const SHOT_CLOCK_MAX = 600;
+let shotClock = SHOT_CLOCK_MAX;
+let lastClockBeepSec = -1;
+
+// Difficulty
+const DIFFICULTIES = [
+  { name: 'ROOKIE',  noise: 16, lateNoise: 11 },
+  { name: 'PRO',     noise: 12, lateNoise: 7  },
+  { name: 'ALL-STAR',noise: 8,  lateNoise: 4  }
+];
+let difficultyIndex = 1;
+
+// Menu demo ball
+let demoBall = { x: W/2, y: FLOOR_Y - 20, vy: 0 };
+
+// Global time counter for animations
+let gameTime = 0;
+
 // Stars (static)
 const stars = [];
 for (let i = 0; i < 50; i++) {
@@ -178,7 +349,12 @@ document.addEventListener('keyup', e => {
 
 function onKeyDown(code) {
   ensureAudio();
-  if (gameState === STATE.MENU && code === 'Enter') { startGame(); return; }
+  if (code === 'KeyM') { toggleMute(); return; }
+  if (gameState === STATE.MENU) {
+    if (code === 'ArrowUp')   { difficultyIndex = Math.max(0, difficultyIndex - 1); playBeep(660); return; }
+    if (code === 'ArrowDown') { difficultyIndex = Math.min(DIFFICULTIES.length - 1, difficultyIndex + 1); playBeep(660); return; }
+    if (code === 'Enter') { startGame(); return; }
+  }
   if (gameState === STATE.GAME_OVER && code === 'Enter') { startGame(); return; }
   if (gameState === STATE.PLAYER_TURN) {
     if (code === 'ArrowLeft')  aimAngle = Math.min(85, aimAngle + 2);
@@ -202,7 +378,16 @@ function startGame() {
   popup.timer = 0; scoreFlash.timer = 0;
   power = 0; charging = false;
   aimAngle = 55;
+  streak = { player: 0, cpu: 0 };
+  onFire = { player: false, cpu: false };
+  callout.timer = 0; flash.timer = 0; hitStop = 0; crowdHype = 0;
+  floaters = []; confetti = [];
+  rimFx = { CPU: { flash: 0, shake: 0 }, PLAYER: { flash: 0, shake: 0 } };
+  netFx = { CPU: 0, PLAYER: 0 };
+  shotClock = SHOT_CLOCK_MAX;
+  lastClockBeepSec = -1;
   resetBall();
+  startBeat();
   gameState = STATE.PLAYER_TURN;
 }
 
@@ -224,6 +409,7 @@ function resetBall() {
 
 function shootBall(shooter) {
   ball.active = true;
+  touchedRim = false;
   const angleRad = aimAngle * Math.PI / 180;
   const pwr = Math.max(6, power);
   if (shooter === 'player') {
@@ -252,8 +438,9 @@ function cpuAI() {
   let bestPow = Math.sqrt(dx * GRAVITY / Math.sin(2 * bestAngle * Math.PI / 180));
   bestPow = Math.max(8, Math.min(18, bestPow));
 
-  // Add noise based on score
-  const noise = cpuScore >= 15 ? 7 : 12;
+  // Add noise based on difficulty (less when close to winning = more pressure clutch)
+  const diff = DIFFICULTIES[difficultyIndex];
+  const noise = cpuScore >= 15 ? diff.lateNoise : diff.noise;
   bestAngle += (Math.random() - 0.5) * noise;
   bestPow   += (Math.random() - 0.5) * 2.5;
   bestAngle = Math.max(15, Math.min(75, bestAngle));
@@ -289,10 +476,54 @@ function showPopup(text, x, y, color) {
   popup.timer = 90; popup.color = color || '#ffffff';
 }
 
+// ─── ARCADE FX HELPERS ───────────────────────────────────────────────────────
+const MAKE_CALLS = ['BOOMSHAKALAKA!','SWISH!','NOTHIN\' BUT NET!','BANG!','COUNT IT!'];
+const HOT_CALLS  = ['HE\'S ON FIRE!','RAZZLE DAZZLE!','FROM DOWNTOWN!','UNCONSCIOUS!','BOOMSHAKALAKA!'];
+const MISS_CALLS_RIM = ['OFF THE RIM!','BRICK!','NO GOOD!'];
+const MISS_CALLS_AIR = ['AIRBALL!','WAY OFF!','BRICK!'];
+
+function showCallout(text, color, hot) {
+  callout.text = text;
+  callout.timer = 75;
+  callout.color = color || '#ffff00';
+  callout.hot = !!hot;
+}
+function screenFlash(color, strength) {
+  flash.color = color || '#ffffff';
+  flash.max = strength || 0.5;
+  flash.timer = 12;
+}
+function addFloater(text, x, y, color) {
+  floaters.push({ text, x, y, vy: -1.2, life: 70, color });
+}
+function spawnConfetti() {
+  const cols = ['#ff0066','#00ffff','#ffff00','#00ff66','#ff6600','#ffffff','#aa44ff'];
+  for (let i = 0; i < 160; i++) {
+    confetti.push({
+      x: Math.random() * W, y: -Math.random() * 200,
+      vx: (Math.random() - 0.5) * 2, vy: Math.random() * 2 + 1,
+      r: Math.random() * 4 + 2, color: cols[Math.floor(Math.random()*cols.length)],
+      rot: Math.random() * Math.PI, vr: (Math.random()-0.5)*0.3, life: 1
+    });
+  }
+}
+function spawnFireParticle(x, y) {
+  const cols = ['#ff3300','#ff6600','#ffaa00','#ffdd33'];
+  particles.push({
+    x: x + (Math.random()-0.5)*10, y: y + (Math.random()-0.5)*10,
+    vx: (Math.random()-0.5)*1.5, vy: -Math.random()*2 - 1,
+    life: 1, decay: Math.random()*0.05 + 0.04,
+    color: cols[Math.floor(Math.random()*cols.length)],
+    r: Math.random()*5 + 3, fire: true
+  });
+}
+
 // ─── PHYSICS & COLLISION ─────────────────────────────────────────────────────
 function checkScore(hoop) {
-  const inner1 = hoop.rimX1 + 4;
-  const inner2 = hoop.rimX2 - 4;
+  // Fire mode gives the shooter a slightly wider rim tolerance (small bonus).
+  const fireBonus = onFire[whose_turn] ? 2 : 0;
+  const inner1 = hoop.rimX1 + 4 - fireBonus;
+  const inner2 = hoop.rimX2 - 4 + fireBonus;
   // Use a swept vertical window equal to the ball's radius plus the rim
   // thickness so fast-moving balls don't tunnel through the detection plane.
   const tolerance = BALL_R + 6;
@@ -302,6 +533,12 @@ function checkScore(hoop) {
     return true;
   }
   return false;
+}
+// A swish = clean make through the center without ever touching the rim.
+function isSwish(hoop) {
+  const cx = (hoop.rimX1 + hoop.rimX2) / 2;
+  const centerWindow = 12;
+  return !touchedRim && Math.abs(ball.x - cx) < centerWindow;
 }
 
 function checkRimCollision(hoop) {
@@ -321,6 +558,10 @@ function checkRimCollision(hoop) {
       ball.x  = pt.x + nx * (BALL_R + 5);
       ball.y  = pt.y + ny * (BALL_R + 5);
       shakeMag = 4;
+      touchedRim = true;
+      const key = hoop === CPU_HOOP ? 'CPU' : 'PLAYER';
+      rimFx[key].flash = Math.max(rimFx[key].flash, 12);
+      rimFx[key].shake = Math.max(rimFx[key].shake, 8);
       playBounce();
     }
   }
@@ -344,22 +585,50 @@ function updateBall() {
 
   // Check score first
   if (checkScore(hoop)) {
-    if (whose_turn === 'player') {
-      playerScore += 2;
-      showPopup('SWISH!', ball.x, ball.y - 40, '#00ffff');
-      scoreFlash = { who: 'player', timer: 45 };
+    const shooter = whose_turn;
+    const swish = isSwish(hoop);
+    const pts = swish ? 3 : 2;
+    const isPlayer = shooter === 'player';
+    const baseColor = isPlayer ? '#00ffff' : '#ff4444';
+    const hoopKey = hoop === CPU_HOOP ? 'CPU' : 'PLAYER';
+
+    if (isPlayer) playerScore += pts; else cpuScore += pts;
+    scoreFlash = { who: shooter, timer: 45 };
+
+    // Combo / fire tracking
+    streak[shooter]++;
+    const justCaughtFire = !onFire[shooter] && streak[shooter] >= 3;
+    if (streak[shooter] >= 3) onFire[shooter] = true;
+    if (justCaughtFire) playFireWhoosh();
+
+    // Floating +2 / +3
+    addFloater('+' + pts, ball.x, ball.y - 30, baseColor);
+
+    // Announcer callout
+    if (onFire[shooter]) {
+      showCallout(HOT_CALLS[Math.floor(Math.random()*HOT_CALLS.length)], '#ff7700', true);
+    } else if (swish) {
+      showCallout('DOWNTOWN!', baseColor, false);
     } else {
-      cpuScore += 2;
-      showPopup('NICE!', ball.x, ball.y - 40, '#ff4444');
-      scoreFlash = { who: 'cpu', timer: 45 };
+      showCallout(MAKE_CALLS[Math.floor(Math.random()*MAKE_CALLS.length)], '#ffff00', false);
     }
+
+    // Juice
+    screenFlash(swish ? baseColor : '#ffffff', swish ? 0.55 : 0.4);
+    if (swish) hitStop = 6;
+    shakeMag = Math.max(shakeMag, swish ? 9 : 6);
+    netFx[hoopKey] = 18;
+    crowdHype = 40;
     spawnParticles(ball.x, ball.y);
-    playScore();
+    if (swish) { playSwish(); setTimeout(() => playScore(), 90); } else playScore();
+
     ball.active = false;
     ballTrail = [];
 
     if (playerScore >= WINNING_SCORE || cpuScore >= WINNING_SCORE) {
-      setTimeout(() => { playWinJingle(); gameState = STATE.GAME_OVER; }, 700);
+      stopBeat();
+      if (isPlayer) { spawnConfetti(); }
+      setTimeout(() => { playWinJingle(); playBuzzer(); gameState = STATE.GAME_OVER; }, 700);
     } else {
       whose_turn = whose_turn === 'player' ? 'cpu' : 'player';
       setTimeout(() => nextTurn(), 1100);
@@ -373,17 +642,33 @@ function updateBall() {
 
   // Miss
   if (ball.y > H + 20 || ball.x < -60 || ball.x > W + 60) {
-    showPopup('MISS!', W / 2, H / 2 - 60, '#ff6600');
-    playMiss();
-    ball.active = false;
-    ballTrail = [];
-    whose_turn = whose_turn === 'player' ? 'cpu' : 'player';
-    setTimeout(() => nextTurn(), 1100);
+    endMiss(false);
   }
+}
+
+// Handle a missed shot (rim-out / airball / shot-clock violation).
+function endMiss(clockViolation) {
+  const shooter = whose_turn;
+  streak[shooter] = 0;
+  onFire[shooter] = false;
+  if (clockViolation) {
+    showCallout('SHOT CLOCK!', '#ff3333', false);
+  } else {
+    const calls = touchedRim ? MISS_CALLS_RIM : MISS_CALLS_AIR;
+    showCallout(calls[Math.floor(Math.random()*calls.length)], '#ff6600', false);
+  }
+  showPopup('MISS!', W / 2, H / 2 - 60, '#ff6600');
+  playMiss();
+  ball.active = false;
+  ballTrail = [];
+  whose_turn = whose_turn === 'player' ? 'cpu' : 'player';
+  setTimeout(() => nextTurn(), 1100);
 }
 
 function nextTurn() {
   resetBall();
+  shotClock = SHOT_CLOCK_MAX;
+  lastClockBeepSec = -1;
   if (whose_turn === 'player') {
     aimAngle = 55;
     gameState = STATE.PLAYER_TURN;
@@ -395,6 +680,55 @@ function nextTurn() {
 
 // ─── UPDATE ──────────────────────────────────────────────────────────────────
 function update() {
+  gameTime++;
+
+  // Hit-stop (slow-motion) — skip most of the simulation for a few frames.
+  if (hitStop > 0) {
+    hitStop--;
+    // Still advance lightweight visual timers so FX don't freeze entirely.
+    if (callout.timer > 0) callout.timer--;
+    if (flash.timer > 0) flash.timer--;
+    updateFx();
+    return;
+  }
+
+  // Menu demo ball bounce
+  if (gameState === STATE.MENU) {
+    demoBall.vy += 0.4;
+    demoBall.y += demoBall.vy;
+    if (demoBall.y > FLOOR_Y - 20) { demoBall.y = FLOOR_Y - 20; demoBall.vy = -9; }
+  }
+
+  // Star twinkle
+  for (const s of stars) {
+    s.bright += (Math.random() - 0.5) * 0.08;
+    if (s.bright < 0) s.bright = 0;
+    if (s.bright > 1) s.bright = 1;
+  }
+
+  updateFx();
+
+  // Shot clock (only during player aiming)
+  if (gameState === STATE.PLAYER_TURN) {
+    shotClock--;
+    const secLeft = Math.ceil(shotClock / 60);
+    if (secLeft <= 3 && secLeft > 0 && secLeft !== lastClockBeepSec) {
+      lastClockBeepSec = secLeft;
+      playBeep(secLeft === 1 ? 1320 : 990);
+    }
+    if (shotClock <= 0) {
+      charging = false;
+      gameState = STATE.BALL_FLYING; // leave PLAYER_TURN so the clock stops re-firing
+      ball.active = false;
+      endMiss(true);
+    }
+  }
+
+  // Fire-mode ball trail particles
+  if (gameState === STATE.BALL_FLYING && ball.active && onFire[whose_turn]) {
+    spawnFireParticle(ball.x, ball.y);
+  }
+
   // Screen shake
   if (shakeMag > 0) {
     shakeX = (Math.random() - 0.5) * shakeMag * 2;
@@ -413,6 +747,8 @@ function update() {
 
   if (popup.timer > 0) popup.timer--;
   if (scoreFlash.timer > 0) scoreFlash.timer--;
+  if (callout.timer > 0) callout.timer--;
+  if (flash.timer > 0) flash.timer--;
 
   if (gameState === STATE.PLAYER_TURN) {
     if (keys['ArrowLeft'])  aimAngle = Math.min(85, aimAngle + 1.5);
@@ -428,6 +764,30 @@ function update() {
   if (gameState === STATE.BALL_FLYING) {
     updateBall();
   }
+}
+
+// Update floaters, confetti, and decaying FX timers (runs even during hit-stop).
+function updateFx() {
+  for (let i = floaters.length - 1; i >= 0; i--) {
+    const f = floaters[i];
+    f.y += f.vy; f.life--;
+    if (f.life <= 0) floaters.splice(i, 1);
+  }
+  for (let i = confetti.length - 1; i >= 0; i--) {
+    const c = confetti[i];
+    c.x += c.vx; c.y += c.vy; c.vy += 0.04; c.rot += c.vr;
+    if (c.y > H + 20) {
+      if (gameState === STATE.GAME_OVER) { c.y = -10; c.vy = Math.random()*2+1; c.x = Math.random()*W; }
+      else confetti.splice(i, 1);
+    }
+  }
+  if (rimFx.CPU.flash > 0)    rimFx.CPU.flash--;
+  if (rimFx.CPU.shake > 0)    rimFx.CPU.shake--;
+  if (rimFx.PLAYER.flash > 0) rimFx.PLAYER.flash--;
+  if (rimFx.PLAYER.shake > 0) rimFx.PLAYER.shake--;
+  if (netFx.CPU > 0)    netFx.CPU--;
+  if (netFx.PLAYER > 0) netFx.PLAYER--;
+  if (crowdHype > 0)    crowdHype--;
 }
 
 // ─── DRAW HELPERS ────────────────────────────────────────────────────────────
@@ -483,9 +843,13 @@ function drawFloor() {
   ctx.beginPath(); ctx.moveTo(W/2, FLOOR_Y); ctx.lineTo(W/2, H); ctx.stroke();
   ctx.setLineDash([]);
 
-  // Three-point arcs (approximate)
-  ctx.strokeStyle = 'rgba(255,255,255,0.2)';
-  ctx.lineWidth = 2;
+  // Three-point arcs — glowing & pulsing
+  const pulse = 0.35 + Math.sin(gameTime * 0.06) * 0.2;
+  ctx.save();
+  ctx.strokeStyle = `rgba(0,255,255,${pulse})`;
+  ctx.shadowBlur = 12 + Math.sin(gameTime * 0.06) * 6;
+  ctx.shadowColor = '#00ffff';
+  ctx.lineWidth = 2.5;
   // Player side (right arc from left)
   ctx.beginPath();
   ctx.arc(80, FLOOR_Y, 160, -Math.PI/2, 0);
@@ -494,6 +858,7 @@ function drawFloor() {
   ctx.beginPath();
   ctx.arc(720, FLOOR_Y, 160, Math.PI, Math.PI + Math.PI/2);
   ctx.stroke();
+  ctx.restore();
 
   // Center circle
   ctx.beginPath();
@@ -531,28 +896,37 @@ function drawHoop(hoop, side) {
     ctx.fillRect(hoop.rimX1, hoop.rimY - 3, bbX - hoop.rimX1, 6);
   }
 
-  // Rim with neon glow
+  // Rim with neon glow (flickering + flash on a make)
+  const key = hoop === CPU_HOOP ? 'CPU' : 'PLAYER';
+  const flashAmt = rimFx[key].flash / 12;
+  const rimShake = rimFx[key].shake > 0 ? (Math.random() - 0.5) * 4 : 0;
+  const flicker = 12 + Math.sin(gameTime * 0.4 + bbX) * 4 + Math.random() * 3;
   ctx.save();
-  ctx.shadowBlur = 15; ctx.shadowColor = '#00ffff';
-  ctx.strokeStyle = '#ff4400';
-  ctx.lineWidth = 4;
+  ctx.shadowBlur = flashAmt > 0 ? 25 : flicker;
+  ctx.shadowColor = flashAmt > 0 ? '#ffff00' : '#00ffff';
+  ctx.strokeStyle = flashAmt > 0
+    ? `rgb(255,${Math.floor(150 + flashAmt*105)},${Math.floor(flashAmt*120)})`
+    : '#ff4400';
+  ctx.lineWidth = 4 + flashAmt * 2;
   ctx.beginPath();
-  ctx.moveTo(hoop.rimX1, hoop.rimY);
-  ctx.lineTo(hoop.rimX2, hoop.rimY);
+  ctx.moveTo(hoop.rimX1, hoop.rimY + rimShake);
+  ctx.lineTo(hoop.rimX2, hoop.rimY + rimShake);
   ctx.stroke();
   ctx.restore();
 
-  // Net
-  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+  // Net — swishes/stretches downward briefly when ball passes through
+  const swish = netFx[key] / 18;
+  ctx.strokeStyle = swish > 0 ? `rgba(255,255,255,${0.5 + swish*0.4})` : 'rgba(255,255,255,0.5)';
   ctx.lineWidth = 1;
-  const netTop = hoop.rimY;
-  const netBot = hoop.rimY + 35;
+  const netTop = hoop.rimY + rimShake;
+  const netBot = hoop.rimY + 35 + swish * 18;
   const midX   = (hoop.rimX1 + hoop.rimX2) / 2;
+  const sway    = Math.sin(gameTime * 0.5) * swish * 4;
   for (let nx = hoop.rimX1; nx <= hoop.rimX2; nx += 8) {
     const offset = (nx - midX) * 0.35;
     ctx.beginPath();
     ctx.moveTo(nx, netTop);
-    ctx.lineTo(midX + offset * 0.4, netBot);
+    ctx.lineTo(midX + offset * 0.4 + sway, netBot);
     ctx.stroke();
   }
   for (let row = 0; row <= 3; row++) {
@@ -589,14 +963,20 @@ function drawLampPost(x) {
 }
 
 function drawCrowd() {
-  for (const c of crowd) {
-    ctx.fillStyle = 'rgba(15,15,35,0.95)';
-    ctx.beginPath(); ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2); ctx.fill();
-    ctx.fillRect(c.x - c.r * 0.6, c.y, c.r * 1.2, c.r * 1.6);
-    // Random colored shirt
+  const hype = crowdHype / 40;
+  for (let i = 0; i < crowd.length; i++) {
+    const c = crowd[i];
+    // Crowd jumps (offset upward) and brightens when hyped
+    const jump = hype > 0 ? Math.abs(Math.sin(gameTime * 0.4 + i)) * hype * 8 : 0;
+    const cy = c.y - jump;
+    const bodyAlpha = 0.95;
+    ctx.fillStyle = `rgba(${15 + hype*60},${15 + hype*60},${35 + hype*60},${bodyAlpha})`;
+    ctx.beginPath(); ctx.arc(c.x, cy, c.r, 0, Math.PI * 2); ctx.fill();
+    ctx.fillRect(c.x - c.r * 0.6, cy, c.r * 1.2, c.r * 1.6);
+    // Colored shirt (brighter on hype)
     const hue = (c.x * 3.7) % 360;
-    ctx.fillStyle = `hsla(${hue},70%,50%,0.3)`;
-    ctx.fillRect(c.x - c.r * 0.55, c.y, c.r * 1.1, c.r * 1.4);
+    ctx.fillStyle = `hsla(${hue},70%,55%,${0.3 + hype*0.5})`;
+    ctx.fillRect(c.x - c.r * 0.55, cy, c.r * 1.1, c.r * 1.4);
   }
 }
 
@@ -664,14 +1044,21 @@ function drawBall() {
     ctx.beginPath(); ctx.arc(ballTrail[i].x, ballTrail[i].y, r, 0, Math.PI * 2); ctx.fill();
   }
 
+  const fired = onFire[whose_turn] && (ball.active || gameState === STATE.PLAYER_TURN || gameState === STATE.CPU_TURN);
   ctx.save();
-  ctx.shadowBlur = 15; ctx.shadowColor = '#ff6600';
+  ctx.shadowBlur = fired ? 28 + Math.random()*8 : 15;
+  ctx.shadowColor = fired ? '#ff3300' : '#ff6600';
   ctx.translate(ball.x, ball.y);
   ctx.rotate(ball.rotation);
 
   const ballGrad = ctx.createRadialGradient(-3, -3, 1, 0, 0, BALL_R);
-  ballGrad.addColorStop(0, '#ff9955');
-  ballGrad.addColorStop(1, '#cc3300');
+  if (fired) {
+    ballGrad.addColorStop(0, '#ffdd33');
+    ballGrad.addColorStop(1, '#ff3300');
+  } else {
+    ballGrad.addColorStop(0, '#ff9955');
+    ballGrad.addColorStop(1, '#cc3300');
+  }
   ctx.fillStyle = ballGrad;
   ctx.beginPath(); ctx.arc(0, 0, BALL_R, 0, Math.PI * 2); ctx.fill();
   ctx.shadowBlur = 0;
@@ -863,36 +1250,72 @@ function drawPopup() {
 }
 
 function drawMenuScreen() {
-  ctx.fillStyle = 'rgba(0,0,20,0.88)';
+  ctx.fillStyle = 'rgba(0,0,20,0.82)';
   ctx.fillRect(0, 0, W, H);
 
-  // Title
+  // Demo bouncing ball
+  ctx.save();
+  ctx.shadowBlur = 18; ctx.shadowColor = '#ff6600';
+  const dg = ctx.createRadialGradient(demoBall.x - 3, demoBall.y - 3, 1, demoBall.x, demoBall.y, BALL_R);
+  dg.addColorStop(0, '#ff9955'); dg.addColorStop(1, '#cc3300');
+  ctx.fillStyle = dg;
+  ctx.beginPath(); ctx.arc(demoBall.x, demoBall.y, BALL_R, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+
+  // Animated title (pulsing + bouncing)
+  const bounce = Math.sin(gameTime * 0.05) * 6;
+  const pulse  = 1 + Math.sin(gameTime * 0.1) * 0.04;
+  ctx.save();
+  ctx.translate(W/2, H/2 - 80 + bounce);
+  ctx.scale(pulse, pulse);
   ctx.font = '30px "Press Start 2P"';
   ctx.textAlign = 'center';
   ctx.shadowBlur = 28; ctx.shadowColor = '#00ffff';
   ctx.fillStyle = '#00ffff';
-  ctx.fillText('STREET BALL', W/2, H/2 - 80);
+  ctx.fillText('STREET BALL', 0, 0);
   ctx.fillStyle = '#ff6600'; ctx.shadowColor = '#ff6600';
   ctx.font = '44px "Press Start 2P"';
-  ctx.fillText('21', W/2, H/2 - 22);
-  ctx.shadowBlur = 0;
+  ctx.fillText('21', 0, 58);
+  ctx.restore();
 
   ctx.font = '7px "Press Start 2P"';
+  ctx.shadowBlur = 0;
   ctx.fillStyle = '#7788bb';
-  ctx.fillText('RETRO STREET BASKETBALL', W/2, H/2 + 18);
+  ctx.textAlign = 'center';
+  ctx.fillText('NBA JAM STYLE STREET BASKETBALL', W/2, H/2 + 18);
 
-  if (Math.floor(Date.now() / 500) % 2 === 0) {
+  // Difficulty selector (UP/DOWN to change)
+  ctx.font = '8px "Press Start 2P"';
+  ctx.fillStyle = '#88aacc';
+  ctx.fillText('- SELECT DIFFICULTY (▲ ▼) -', W/2, H/2 + 46);
+  for (let i = 0; i < DIFFICULTIES.length; i++) {
+    const sel = i === difficultyIndex;
+    const x = W/2 + (i - 1) * 130;
+    ctx.font = '10px "Press Start 2P"';
+    if (sel) {
+      const fl = Math.floor(gameTime / 12) % 2 === 0;
+      ctx.fillStyle = fl ? '#ffff00' : '#ffaa00';
+      ctx.shadowBlur = 12; ctx.shadowColor = '#ffff00';
+      ctx.fillText('[' + DIFFICULTIES[i].name + ']', x, H/2 + 70);
+      ctx.shadowBlur = 0;
+    } else {
+      ctx.fillStyle = '#556';
+      ctx.fillText(DIFFICULTIES[i].name, x, H/2 + 70);
+    }
+  }
+
+  if (Math.floor(gameTime / 30) % 2 === 0) {
     ctx.font = '10px "Press Start 2P"';
     ctx.fillStyle = '#ffff00';
     ctx.shadowBlur = 10; ctx.shadowColor = '#ffff00';
-    ctx.fillText('PRESS ENTER TO PLAY', W/2, H/2 + 58);
+    ctx.fillText('PRESS ENTER TO PLAY', W/2, H/2 + 100);
     ctx.shadowBlur = 0;
   }
 
   ctx.font = '6px "Press Start 2P"';
   ctx.fillStyle = '#445566';
-  ctx.fillText('ALL BASKETS = 2 PTS  |  FIRST TO 21 WINS', W/2, H/2 + 95);
-  ctx.fillText('YOU SHOOT FIRST EVERY GAME', W/2, H/2 + 112);
+  ctx.fillText('SWISH = 3 PTS  |  MAKE = 2 PTS  |  FIRST TO 21', W/2, H/2 + 124);
+  ctx.fillText('3 IN A ROW = ON FIRE!   [M] MUTE', W/2, H/2 + 138);
 }
 
 function drawGameOverScreen() {
@@ -900,14 +1323,20 @@ function drawGameOverScreen() {
   ctx.fillRect(0, 0, W, H);
 
   const playerWon = playerScore >= WINNING_SCORE;
-  const winner    = playerWon ? 'YOU WIN!' : 'CPU WINS!';
-  const winColor  = playerWon ? '#00ffff' : '#ff4444';
+  const winner    = playerWon ? 'CHAMPION!' : 'CPU WINS!';
+  const winColor  = playerWon ? '#ffdd00' : '#ff4444';
 
+  const pulse = playerWon ? 1 + Math.sin(gameTime * 0.12) * 0.06 : 1;
+  ctx.save();
+  ctx.translate(W/2, H/2 - 65);
+  ctx.scale(pulse, pulse);
   ctx.font = '28px "Press Start 2P"';
   ctx.textAlign = 'center';
-  ctx.shadowBlur = 30; ctx.shadowColor = winColor;
-  ctx.fillStyle = winColor;
-  ctx.fillText(winner, W/2, H/2 - 65);
+  ctx.shadowBlur = 30;
+  ctx.shadowColor = playerWon ? `hsl(${(gameTime*6)%60},100%,55%)` : winColor;
+  ctx.fillStyle = playerWon ? `hsl(${(gameTime*6)%60},100%,60%)` : winColor;
+  ctx.fillText(winner, 0, 0);
+  ctx.restore();
   ctx.shadowBlur = 0;
 
   ctx.font = '11px "Press Start 2P"';
@@ -925,6 +1354,97 @@ function drawGameOverScreen() {
     ctx.fillText('PRESS ENTER TO PLAY AGAIN', W/2, H/2 + 65);
     ctx.shadowBlur = 0;
   }
+}
+
+// ─── ARCADE FX RENDERING ─────────────────────────────────────────────────────
+function drawCallout() {
+  if (callout.timer <= 0) return;
+  // Slam-in scale: overshoot then settle.
+  const t = (75 - callout.timer) / 75;
+  const slam = callout.timer > 60 ? 1.6 - (75 - callout.timer) / 15 * 0.6 : 1;
+  const alpha = callout.timer < 15 ? callout.timer / 15 : 1;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.translate(W / 2, 150);
+  ctx.scale(slam, slam);
+  const wob = callout.hot ? Math.sin(gameTime * 0.5) * 0.08 : 0;
+  ctx.rotate(wob);
+  ctx.font = '26px "Press Start 2P"';
+  ctx.textAlign = 'center';
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = '#000';
+  ctx.shadowBlur = 24; ctx.shadowColor = callout.color;
+  ctx.fillStyle = callout.hot
+    ? `hsl(${(gameTime*8)%60},100%,55%)`
+    : callout.color;
+  ctx.strokeText(callout.text, 0, 0);
+  ctx.fillText(callout.text, 0, 0);
+  ctx.restore();
+}
+
+function drawFloaters() {
+  ctx.save();
+  ctx.font = '16px "Press Start 2P"';
+  ctx.textAlign = 'center';
+  for (const f of floaters) {
+    ctx.globalAlpha = Math.min(1, f.life / 25);
+    ctx.shadowBlur = 12; ctx.shadowColor = f.color;
+    ctx.fillStyle = f.color;
+    ctx.fillText(f.text, f.x, f.y);
+  }
+  ctx.restore();
+}
+
+function drawConfetti() {
+  ctx.save();
+  for (const c of confetti) {
+    ctx.globalAlpha = c.life;
+    ctx.translate(c.x, c.y);
+    ctx.rotate(c.rot);
+    ctx.fillStyle = c.color;
+    ctx.fillRect(-c.r, -c.r * 0.5, c.r * 2, c.r);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  }
+  ctx.restore();
+}
+
+function drawScreenFlash() {
+  if (flash.timer <= 0) return;
+  const a = (flash.timer / 12) * flash.max;
+  ctx.save();
+  ctx.globalAlpha = a;
+  ctx.fillStyle = flash.color;
+  ctx.fillRect(0, 0, W, H);
+  ctx.restore();
+}
+
+function drawShotClock() {
+  if (gameState !== STATE.PLAYER_TURN) return;
+  const sec = Math.max(0, Math.ceil(shotClock / 60));
+  const danger = sec <= 3;
+  const blink = danger && Math.floor(gameTime / 6) % 2 === 0;
+  ctx.font = '14px "Press Start 2P"';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = danger ? (blink ? '#ffffff' : '#ff2222') : '#ffdd00';
+  ctx.shadowBlur = danger ? 14 : 6;
+  ctx.shadowColor = danger ? '#ff0000' : '#ffaa00';
+  // Top-right corner panel so it doesn't collide with the turn indicator.
+  ctx.fillText(':' + (sec < 10 ? '0' + sec : sec), W - 36, 28);
+  ctx.font = '5px "Press Start 2P"';
+  ctx.fillStyle = '#557';
+  ctx.shadowBlur = 0;
+  ctx.fillText('SHOT', W - 36, 40);
+  ctx.shadowBlur = 0;
+}
+
+function drawMuteIndicator() {
+  if (!muted) return;
+  ctx.save();
+  ctx.font = '7px "Press Start 2P"';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#ff5555';
+  ctx.fillText('MUTED [M]', 8, H - 10);
+  ctx.restore();
 }
 
 // ─── MAIN RENDER ─────────────────────────────────────────────────────────────
@@ -953,15 +1473,24 @@ function render() {
   if (gameState !== STATE.MENU && gameState !== STATE.GAME_OVER) {
     drawScoreboard();
     drawTurnIndicator();
+    drawShotClock();
     drawAngleDisplay();
     drawControlsHint();
   }
 
+  drawFloaters();
   drawPopup();
+  drawCallout();
   ctx.restore();
+
+  // Full-screen overlays (not shaken)
+  drawScreenFlash();
+  if (confetti.length) drawConfetti();
 
   if (gameState === STATE.MENU)      drawMenuScreen();
   if (gameState === STATE.GAME_OVER) drawGameOverScreen();
+
+  drawMuteIndicator();
 }
 
 // ─── GAME LOOP ───────────────────────────────────────────────────────────────
